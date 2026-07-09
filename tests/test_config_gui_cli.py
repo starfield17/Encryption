@@ -38,7 +38,7 @@ def test_app_config_has_defaults():
     config_dir, _workdir = ensure_runtime_layout()
     config = load_app_config(config_dir)
 
-    assert config["language"] in {"zh_cn", "en"}
+    assert config["language"] == "en"
     assert config["default_preset_name"] == "default_standard"
 
 

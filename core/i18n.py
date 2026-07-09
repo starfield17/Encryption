@@ -8,7 +8,7 @@ SUPPORTED_LANGUAGES = {"en", "zh_cn"}
 
 
 class Translator:
-    def __init__(self, language: str = "zh_cn", config_dir: Path = Path("config")) -> None:
+    def __init__(self, language: str = "en", config_dir: Path = Path("config")) -> None:
         self.config_dir = config_dir
         self.language = language if language in SUPPORTED_LANGUAGES else "en"
         self.messages = self._load_messages(self.language)
@@ -31,4 +31,3 @@ class Translator:
 
 def get_translator(language: str, config_dir: Path) -> Translator:
     return Translator(language=language, config_dir=config_dir)
-

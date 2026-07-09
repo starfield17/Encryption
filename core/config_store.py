@@ -34,7 +34,7 @@ def _preset_path(name: str, config_dir: Path) -> Path:
 
 def _default_app_config() -> dict[str, Any]:
     return {
-        "language": "zh_cn",
+        "language": "en",
         "default_preset_name": "default_standard",
         "recent_paths": [],
     }
@@ -89,4 +89,3 @@ def update_app_config(
         if updated is not None:
             data = updated
         return _save_app_config_unlocked(config_dir, data)
-

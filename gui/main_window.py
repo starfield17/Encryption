@@ -46,7 +46,7 @@ class MainWindow(QMainWindow):
         self.repo_root = repo_root
         self.config_dir = repo_root / "config"
         self.app_config = load_app_config(self.config_dir)
-        self.language = language or str(self.app_config.get("language", "zh_cn"))
+        self.language = language or str(self.app_config.get("language", "en"))
         self.tr = get_translator(self.language, self.config_dir)
         self.active_worker = None
         self._language_guard = False
@@ -474,4 +474,3 @@ class MainWindow(QMainWindow):
         if any(item in lower for item in forbidden):
             return self.tr.t("gui.message.operation_failed")
         return message
-
