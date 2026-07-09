@@ -38,6 +38,8 @@ from core.archiver import (
     PAYLOAD_HEADER_LEN,
     SALT_LEN,
     TAG_LEN,
+    ZIP_ENTRY_MODE_ARCHIVE,
+    ZIP_ENTRY_MODE_FILES,
     ZipWrapperOptions,
 )
 from core.config_store import load_app_config, load_preset, update_app_config
@@ -217,6 +219,10 @@ class MainWindow(QMainWindow):
         self.zip_entry_source_label = QLabel()
         self.zip_entry_source_edit = QLineEdit()
         self.zip_entry_source_button = QPushButton()
+        self.zip_entry_mode_label = QLabel()
+        self.zip_entry_mode_combo = QComboBox()
+        self.zip_entry_mode_combo.addItem("", ZIP_ENTRY_MODE_ARCHIVE)
+        self.zip_entry_mode_combo.addItem("", ZIP_ENTRY_MODE_FILES)
         self.zip_entry_name_label = QLabel()
         self.zip_entry_name_edit = QLineEdit(DEFAULT_WRAPPER_ENTRY_NAME)
         self.zip_entry_password_label = QLabel()
@@ -230,13 +236,15 @@ class MainWindow(QMainWindow):
         wrapper_form.addWidget(self.zip_wrapper_check, 0, 1)
         self._add_path_row(wrapper_form, 1, self.zip_visible_source_label, self.zip_visible_source_edit, self.zip_visible_source_button)
         self._add_path_row(wrapper_form, 2, self.zip_entry_source_label, self.zip_entry_source_edit, self.zip_entry_source_button)
-        wrapper_form.addWidget(self.zip_entry_name_label, 3, 0)
-        wrapper_form.addWidget(self.zip_entry_name_edit, 3, 1)
-        wrapper_form.addWidget(self.zip_entry_password_label, 4, 0)
-        wrapper_form.addWidget(self.zip_entry_password_edit, 4, 1)
-        wrapper_form.addWidget(self.zip_entry_confirm_label, 5, 0)
-        wrapper_form.addWidget(self.zip_entry_confirm_edit, 5, 1)
-        wrapper_form.addWidget(self.zip_entry_show_password_check, 6, 1)
+        wrapper_form.addWidget(self.zip_entry_mode_label, 3, 0)
+        wrapper_form.addWidget(self.zip_entry_mode_combo, 3, 1)
+        wrapper_form.addWidget(self.zip_entry_name_label, 4, 0)
+        wrapper_form.addWidget(self.zip_entry_name_edit, 4, 1)
+        wrapper_form.addWidget(self.zip_entry_password_label, 5, 0)
+        wrapper_form.addWidget(self.zip_entry_password_edit, 5, 1)
+        wrapper_form.addWidget(self.zip_entry_confirm_label, 6, 0)
+        wrapper_form.addWidget(self.zip_entry_confirm_edit, 6, 1)
+        wrapper_form.addWidget(self.zip_entry_show_password_check, 7, 1)
         wrapper_form.setColumnStretch(1, 1)
         layout.addWidget(self.zip_wrapper_box)
 
@@ -443,6 +451,7 @@ class MainWindow(QMainWindow):
         self.zip_wrapper_check.stateChanged.connect(self._update_zip_wrapper_controls)
         self.zip_visible_source_button.clicked.connect(lambda: self._browse_directory(self.zip_visible_source_edit))
         self.zip_entry_source_button.clicked.connect(lambda: self._browse_directory(self.zip_entry_source_edit))
+        self.zip_entry_mode_combo.currentIndexChanged.connect(self._update_zip_wrapper_controls)
         self.zip_entry_show_password_check.stateChanged.connect(self._update_zip_wrapper_controls)
         self.add_payload_button.clicked.connect(self._add_payload_from_button)
         self.remove_payload_button.clicked.connect(self._remove_selected_payload)
@@ -478,16 +487,19 @@ class MainWindow(QMainWindow):
         self.tabs.setTabText(2, self.tr.t("gui.tab.extract"))
         self.tabs.setTabText(3, self.tr.t("gui.tab.settings"))
 
-        self.create_box.setTitle(self.tr.t("gui.group.create"))
+        self.create_box.setTitle(self.tr.t("gui.group.container_file"))
         self.create_container_label.setText(self.tr.t("gui.label.container"))
         self.create_size_label.setText(self.tr.t("gui.label.size_mb"))
         self.create_slots_label.setText(self.tr.t("gui.label.slot_count"))
         self.create_compress_check.setText(self.tr.t("gui.label.compress_payload"))
         self.create_container_button.setText(self.tr.t("gui.button.browse_file"))
-        self.zip_wrapper_box.setTitle(self.tr.t("gui.group.visible_zip_contents"))
+        self.zip_wrapper_box.setTitle(self.tr.t("gui.group.zip_layer"))
         self.zip_wrapper_check.setText(self.tr.t("gui.label.zip_wrapper"))
         self.zip_visible_source_label.setText(self.tr.t("gui.label.visible_source_dir"))
         self.zip_entry_source_label.setText(self.tr.t("gui.label.passworded_entry_source_dir"))
+        self.zip_entry_mode_label.setText(self.tr.t("gui.label.passworded_entry_mode"))
+        self.zip_entry_mode_combo.setItemText(0, self.tr.t("gui.option.passworded_entry_mode_archive"))
+        self.zip_entry_mode_combo.setItemText(1, self.tr.t("gui.option.passworded_entry_mode_files"))
         self.zip_entry_name_label.setText(self.tr.t("gui.label.passworded_entry_name"))
         self.zip_entry_password_label.setText(self.tr.t("gui.label.passworded_entry_password"))
         self.zip_entry_confirm_label.setText(self.tr.t("gui.label.confirm_password"))
@@ -866,6 +878,7 @@ class MainWindow(QMainWindow):
     def _update_zip_wrapper_controls(self, *_args) -> None:
         enabled = self.zip_wrapper_check.isChecked()
         echo_mode = QLineEdit.Normal if self.zip_entry_show_password_check.isChecked() else QLineEdit.Password
+        archive_mode = self._zip_entry_mode() == ZIP_ENTRY_MODE_ARCHIVE
         for widget in [
             self.zip_visible_source_label,
             self.zip_visible_source_edit,
@@ -873,6 +886,8 @@ class MainWindow(QMainWindow):
             self.zip_entry_source_label,
             self.zip_entry_source_edit,
             self.zip_entry_source_button,
+            self.zip_entry_mode_label,
+            self.zip_entry_mode_combo,
             self.zip_entry_name_label,
             self.zip_entry_name_edit,
             self.zip_entry_password_label,
@@ -882,8 +897,16 @@ class MainWindow(QMainWindow):
             self.zip_entry_show_password_check,
         ]:
             widget.setEnabled(enabled)
+        self.zip_entry_name_label.setEnabled(enabled and archive_mode)
+        self.zip_entry_name_edit.setEnabled(enabled and archive_mode)
         self.zip_entry_password_edit.setEchoMode(echo_mode)
         self.zip_entry_confirm_edit.setEchoMode(echo_mode)
+
+    def _zip_entry_mode(self) -> str:
+        mode = str(self.zip_entry_mode_combo.currentData())
+        if mode in {ZIP_ENTRY_MODE_ARCHIVE, ZIP_ENTRY_MODE_FILES}:
+            return mode
+        return ZIP_ENTRY_MODE_ARCHIVE
 
     def _password_looks_weak(self, password: str) -> bool:
         if not password:
@@ -1127,6 +1150,7 @@ class MainWindow(QMainWindow):
         elif entry_password or entry_confirm:
             return None, self.tr.t("gui.message.passworded_entry_source_required")
 
+        entry_mode = self._zip_entry_mode()
         entry_name = self.zip_entry_name_edit.text().strip() or DEFAULT_WRAPPER_ENTRY_NAME
         return (
             ZipWrapperOptions(
@@ -1135,6 +1159,7 @@ class MainWindow(QMainWindow):
                 encrypted_entry_source_dir=entry_source,
                 encrypted_entry_name=entry_name,
                 encrypted_entry_password=entry_password if entry_source is not None else None,
+                encrypted_entry_mode=entry_mode,
             ),
             None,
         )

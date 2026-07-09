@@ -6,7 +6,15 @@ import sys
 from pathlib import Path
 
 from core.app_paths import ensure_runtime_layout
-from core.archiver import DEFAULT_CONTAINER_SIZE_MB, DEFAULT_SLOT_COUNT, DEFAULT_WRAPPER_ENTRY_NAME, DeniableArchiver, ZipWrapperOptions
+from core.archiver import (
+    DEFAULT_CONTAINER_SIZE_MB,
+    DEFAULT_SLOT_COUNT,
+    DEFAULT_WRAPPER_ENTRY_NAME,
+    ZIP_ENTRY_MODE_ARCHIVE,
+    ZIP_ENTRY_MODE_FILES,
+    DeniableArchiver,
+    ZipWrapperOptions,
+)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -23,6 +31,12 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--visible-source", help="Directory to expose as ordinary ZIP entries")
     init_parser.add_argument("--passworded-entry-source", help="Directory to store as a passworded ZIP entry")
     init_parser.add_argument("--passworded-entry-name", default=DEFAULT_WRAPPER_ENTRY_NAME, help="Name of the passworded ZIP entry")
+    init_parser.add_argument(
+        "--passworded-entry-mode",
+        choices=[ZIP_ENTRY_MODE_ARCHIVE, ZIP_ENTRY_MODE_FILES],
+        default=ZIP_ENTRY_MODE_ARCHIVE,
+        help="How to write passworded ZIP content",
+    )
 
     write_parser = subparsers.add_parser("write", help="Write a directory payload into a slot")
     write_parser.add_argument("container", help="Container path")
@@ -71,6 +85,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     encrypted_entry_source_dir=Path(args.passworded_entry_source) if args.passworded_entry_source else None,
                     encrypted_entry_name=args.passworded_entry_name,
                     encrypted_entry_password=_prompt_zip_entry_password() if args.passworded_entry_source else None,
+                    encrypted_entry_mode=args.passworded_entry_mode,
                 )
             archiver.initialize_container(Path(args.container), size_mb=args.size_mb, slot_count=args.slots, zip_wrapper=zip_wrapper)
             print("Container initialized.")

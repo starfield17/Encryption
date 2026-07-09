@@ -102,13 +102,57 @@ def test_cli_init_zip_wrapper_with_visible_and_passworded_entry(monkeypatch, tmp
 
     assert archiver_module.DeniableArchiver().slot_region_size(vault) == 1024 * 1024
     with zipfile.ZipFile(vault) as archive:
-        assert archive.namelist() == ["readme.txt", "archive.zip"]
+        assert archive.namelist() == ["readme.txt", archiver_module.DEFAULT_WRAPPER_ENTRY_NAME]
         assert archive.read("readme.txt") == b"visible"
     with pyzipper.AESZipFile(vault) as archive:
         archive.setpassword(b"zip entry password")
-        inner_zip = archive.read("archive.zip")
+        inner_zip = archive.read(archiver_module.DEFAULT_WRAPPER_ENTRY_NAME)
     with zipfile.ZipFile(BytesIO(inner_zip)) as inner:
         assert inner.read("entry.txt") == b"entry data"
+
+
+def test_cli_init_zip_wrapper_with_direct_passworded_entries(monkeypatch, tmp_path):
+    vault = tmp_path / "cli-files.zip"
+    visible = tmp_path / "visible"
+    entry_source = tmp_path / "entry-source"
+    nested = entry_source / "nested"
+    visible.mkdir()
+    nested.mkdir(parents=True)
+    (visible / "readme.txt").write_text("visible", encoding="utf-8")
+    (entry_source / "entry.txt").write_text("entry data", encoding="utf-8")
+    (nested / "data.txt").write_text("nested data", encoding="utf-8")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "zip entry password")
+
+    assert (
+        run_cli(
+            [
+                "init",
+                str(vault),
+                "--size-mb",
+                "1",
+                "--slots",
+                "4",
+                "--visible-source",
+                str(visible),
+                "--passworded-entry-source",
+                str(entry_source),
+                "--passworded-entry-mode",
+                "files",
+            ]
+        )
+        == 0
+    )
+
+    assert archiver_module.DeniableArchiver().slot_region_size(vault) == 1024 * 1024
+    with zipfile.ZipFile(vault) as archive:
+        assert archive.namelist() == ["readme.txt", "entry.txt", "nested/data.txt"]
+        assert archive.read("readme.txt") == b"visible"
+        assert archive.getinfo("entry.txt").flag_bits & 0x1
+        assert archive.getinfo("nested/data.txt").flag_bits & 0x1
+    with pyzipper.AESZipFile(vault) as archive:
+        archive.setpassword(b"zip entry password")
+        assert archive.read("entry.txt") == b"entry data"
+        assert archive.read("nested/data.txt") == b"nested data"
 
 
 def test_cli_write_no_compress_roundtrip(monkeypatch, tmp_path):
@@ -162,8 +206,10 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
         assert window.default_extension == ".zip"
         assert window.create_container_edit.placeholderText() == "Choose a new .zip container path"
         assert window.zip_wrapper_check.isChecked()
-        assert window.zip_wrapper_box.title() == "Visible ZIP contents"
-        assert window.zip_entry_name_edit.text() == "archive.zip"
+        assert window.create_box.title() == "Container file"
+        assert window.zip_wrapper_box.title() == "ZIP-compatible layer"
+        assert window.zip_entry_mode_combo.currentData() == "archive"
+        assert window.zip_entry_name_edit.text() == "Documents.zip"
         assert window.write_compress_check.isChecked()
         assert not window.detail_show_password_check.isChecked()
         assert not window.detail_skip_confirm_check.isChecked()
@@ -337,8 +383,17 @@ def test_gui_zip_wrapper_validation_helpers(monkeypatch, tmp_path):
         assert wrapper is not None
         assert wrapper.visible_source_dir == visible
         assert wrapper.encrypted_entry_source_dir == entry_source
-        assert wrapper.encrypted_entry_name == "archive.zip"
+        assert wrapper.encrypted_entry_name == "Documents.zip"
         assert wrapper.encrypted_entry_password == "zip password"
+        assert wrapper.encrypted_entry_mode == "archive"
+
+        files_index = window.zip_entry_mode_combo.findData("files")
+        window.zip_entry_mode_combo.setCurrentIndex(files_index)
+        assert not window.zip_entry_name_edit.isEnabled()
+        wrapper, error = window._collect_zip_wrapper_options()
+        assert error is None
+        assert wrapper is not None
+        assert wrapper.encrypted_entry_mode == "files"
 
         window.zip_wrapper_check.setChecked(False)
         wrapper, error = window._collect_zip_wrapper_options()

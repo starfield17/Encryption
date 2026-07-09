@@ -32,6 +32,17 @@ Add optional ZIP-visible content at creation time:
 python darc.py init vault.zip --size-mb 100 --slots 4 --visible-source ./visible_files --passworded-entry-source ./zip_entry_files
 ```
 
+Passworded ZIP content has two modes:
+
+- `archive` writes one encrypted archive entry such as `Documents.zip`. This keeps the source filenames out of the outer ZIP listing, but ZIP tools show a ZIP file entry inside the container.
+- `files` writes each source file as an encrypted ZIP entry. This looks more like a common encrypted ZIP, but the source filenames and relative paths are listed by ZIP tools.
+
+Select direct encrypted file entries when that presentation is preferred:
+
+```bash
+python darc.py init vault.zip --size-mb 100 --slots 4 --visible-source ./visible_files --passworded-entry-source ./zip_entry_files --passworded-entry-mode files
+```
+
 Create a raw random-looking container instead:
 
 ```bash

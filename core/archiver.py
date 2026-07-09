@@ -42,7 +42,9 @@ ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
 ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
 ZIP_EOCD_LEN = 22
 ZIP_MAX_COMMENT_LEN = 65_535
-DEFAULT_WRAPPER_ENTRY_NAME = "archive.zip"
+ZIP_ENTRY_MODE_ARCHIVE = "archive"
+ZIP_ENTRY_MODE_FILES = "files"
+DEFAULT_WRAPPER_ENTRY_NAME = "Documents.zip"
 
 SUCCESS_MESSAGE = "Extraction complete."
 RAW_DUMP_MESSAGE = "Extraction complete. File system signatures not recognized; output dumped as raw binary."
@@ -66,6 +68,7 @@ class ZipWrapperOptions:
     encrypted_entry_source_dir: Path | None = None
     encrypted_entry_name: str = DEFAULT_WRAPPER_ENTRY_NAME
     encrypted_entry_password: str | None = None
+    encrypted_entry_mode: str = ZIP_ENTRY_MODE_ARCHIVE
 
 
 class DeniableArchiver:
@@ -366,26 +369,71 @@ class DeniableArchiver:
         if options.encrypted_entry_source_dir is not None:
             if not options.encrypted_entry_password:
                 raise ValueError("ZIP entry password is required")
-            entry_name = self._normalize_zip_entry_name(options.encrypted_entry_name)
-            if entry_name in written_names:
-                raise ValueError("ZIP entry name duplicates a visible file")
-            inner_zip = self._zip_directory(Path(options.encrypted_entry_source_dir), compress=True)
-            buffer.seek(0, io.SEEK_END)
-            with pyzipper.AESZipFile(
-                buffer,
-                "a",
-                compression=zipfile.ZIP_DEFLATED,
-                encryption=pyzipper.WZ_AES,
-                allowZip64=False,
-            ) as archive:
-                archive.setpassword(options.encrypted_entry_password.encode("utf-8"))
-                archive.writestr(entry_name, inner_zip)
-            written_names.add(entry_name)
+            if options.encrypted_entry_mode == ZIP_ENTRY_MODE_ARCHIVE:
+                entry_name = self._normalize_zip_entry_name(options.encrypted_entry_name)
+                if entry_name in written_names:
+                    raise ValueError("ZIP entry name duplicates a visible file")
+                inner_zip = self._zip_directory(Path(options.encrypted_entry_source_dir), compress=True)
+                self._append_encrypted_zip_entry(buffer, entry_name, inner_zip, options.encrypted_entry_password)
+                written_names.add(entry_name)
+            elif options.encrypted_entry_mode == ZIP_ENTRY_MODE_FILES:
+                self._append_encrypted_directory_entries(
+                    buffer,
+                    options.encrypted_entry_source_dir,
+                    options.encrypted_entry_password,
+                    written_names,
+                )
+            else:
+                raise ValueError("Unsupported ZIP entry mode")
 
         wrapper = buffer.getvalue()
         if written_names:
             return self._adjust_zip_offsets(wrapper, prefix_len)
         return wrapper
+
+    def _append_encrypted_directory_entries(
+        self,
+        buffer: io.BytesIO,
+        source_dir: str | Path,
+        password: str,
+        written_names: set[str],
+    ) -> None:
+        source_root = Path(source_dir).resolve()
+        if not source_root.exists() or not source_root.is_dir():
+            raise FileNotFoundError(f"Source directory does not exist: {source_root}")
+        buffer.seek(0, io.SEEK_END)
+        with pyzipper.AESZipFile(
+            buffer,
+            "a",
+            compression=zipfile.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+            allowZip64=False,
+        ) as archive:
+            archive.setpassword(password.encode("utf-8"))
+            for item in sorted(source_root.rglob("*")):
+                if item.is_symlink():
+                    raise ValueError(f"Source directory contains an unsupported symlink: {item}")
+                if item.is_dir():
+                    continue
+                if not item.is_file():
+                    raise ValueError(f"Source directory contains an unsupported file type: {item}")
+                arcname = self._normalize_zip_entry_name(item.resolve().relative_to(source_root).as_posix())
+                if arcname in written_names:
+                    raise ValueError("ZIP entry name duplicates a visible file")
+                archive.write(item, arcname)
+                written_names.add(arcname)
+
+    def _append_encrypted_zip_entry(self, buffer: io.BytesIO, name: str, data: bytes, password: str) -> None:
+        buffer.seek(0, io.SEEK_END)
+        with pyzipper.AESZipFile(
+            buffer,
+            "a",
+            compression=zipfile.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+            allowZip64=False,
+        ) as archive:
+            archive.setpassword(password.encode("utf-8"))
+            archive.writestr(name, data)
 
     def _adjust_zip_offsets(self, zip_bytes: bytes, prefix_len: int) -> bytes:
         if prefix_len <= 0:

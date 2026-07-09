@@ -10,7 +10,16 @@ import pyzipper
 import pytest
 
 import core.archiver as archiver_module
-from core.archiver import RAW_DUMP_MESSAGE, RAW_DUMP_SIZE, SUCCESS_MESSAGE, DeniableArchiver, UnsafeZipError, ZipWrapperOptions
+from core.archiver import (
+    DEFAULT_WRAPPER_ENTRY_NAME,
+    RAW_DUMP_MESSAGE,
+    RAW_DUMP_SIZE,
+    SUCCESS_MESSAGE,
+    ZIP_ENTRY_MODE_FILES,
+    DeniableArchiver,
+    UnsafeZipError,
+    ZipWrapperOptions,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -93,7 +102,6 @@ def test_zip_wrapper_visible_layer_and_slots_roundtrip(tmp_path):
             enabled=True,
             visible_source_dir=visible,
             encrypted_entry_source_dir=entry_source,
-            encrypted_entry_name="archive.zip",
             encrypted_entry_password="zip entry password",
         ),
     )
@@ -102,14 +110,14 @@ def test_zip_wrapper_visible_layer_and_slots_roundtrip(tmp_path):
     assert archiver.zip_suffix_offset(vault) == 1024 * 1024
     assert archiver.slot_region_size(vault) == 1024 * 1024
     with zipfile.ZipFile(vault) as archive:
-        assert archive.namelist() == ["readme.txt", "archive.zip"]
+        assert archive.namelist() == ["readme.txt", DEFAULT_WRAPPER_ENTRY_NAME]
         assert archive.read("readme.txt") == b"visible"
-        info = archive.getinfo("archive.zip")
+        info = archive.getinfo(DEFAULT_WRAPPER_ENTRY_NAME)
         assert info.flag_bits & 0x1
 
     with pyzipper.AESZipFile(vault) as archive:
         archive.setpassword(b"zip entry password")
-        inner_zip = archive.read("archive.zip")
+        inner_zip = archive.read(DEFAULT_WRAPPER_ENTRY_NAME)
     with zipfile.ZipFile(BytesIO(inner_zip)) as inner:
         assert inner.read("entry.txt") == b"entry data"
 
@@ -121,7 +129,80 @@ def test_zip_wrapper_visible_layer_and_slots_roundtrip(tmp_path):
     assert result.raw_dumped is False
     assert (output / "secret.txt").read_text(encoding="utf-8") == "payload data"
     with zipfile.ZipFile(vault) as archive:
-        assert archive.namelist() == ["readme.txt", "archive.zip"]
+        assert archive.namelist() == ["readme.txt", DEFAULT_WRAPPER_ENTRY_NAME]
+
+
+def test_zip_wrapper_direct_encrypted_file_entries_roundtrip(tmp_path):
+    archiver = DeniableArchiver()
+    visible = tmp_path / "visible"
+    entry_source = tmp_path / "entry-source"
+    nested = entry_source / "nested"
+    payload = tmp_path / "payload"
+    visible.mkdir()
+    nested.mkdir(parents=True)
+    payload.mkdir()
+    (visible / "readme.txt").write_text("visible", encoding="utf-8")
+    (entry_source / "entry.txt").write_text("entry data", encoding="utf-8")
+    (nested / "data.txt").write_text("nested data", encoding="utf-8")
+    (payload / "payload.txt").write_text("payload data", encoding="utf-8")
+
+    vault = tmp_path / "vault.zip"
+    archiver.initialize_container(
+        vault,
+        size_mb=1,
+        slot_count=4,
+        zip_wrapper=ZipWrapperOptions(
+            enabled=True,
+            visible_source_dir=visible,
+            encrypted_entry_source_dir=entry_source,
+            encrypted_entry_password="zip entry password",
+            encrypted_entry_mode=ZIP_ENTRY_MODE_FILES,
+        ),
+    )
+
+    assert archiver.zip_suffix_offset(vault) == 1024 * 1024
+    with zipfile.ZipFile(vault) as archive:
+        assert archive.namelist() == ["readme.txt", "entry.txt", "nested/data.txt"]
+        assert archive.read("readme.txt") == b"visible"
+        assert archive.getinfo("entry.txt").flag_bits & 0x1
+        assert archive.getinfo("nested/data.txt").flag_bits & 0x1
+
+    with pyzipper.AESZipFile(vault) as archive:
+        archive.setpassword(b"zip entry password")
+        assert archive.read("entry.txt") == b"entry data"
+        assert archive.read("nested/data.txt") == b"nested data"
+
+    archiver.write_payload(vault, payload, "payload password", 1, slot_count=4)
+    output = tmp_path / "output"
+    result = archiver.extract_payload(vault, "payload password", output, slot_count=4)
+
+    assert result.message == SUCCESS_MESSAGE
+    assert result.raw_dumped is False
+    assert (output / "payload.txt").read_text(encoding="utf-8") == "payload data"
+
+
+def test_zip_wrapper_direct_entries_reject_duplicate_visible_path(tmp_path):
+    archiver = DeniableArchiver()
+    visible = tmp_path / "visible"
+    entry_source = tmp_path / "entry-source"
+    visible.mkdir()
+    entry_source.mkdir()
+    (visible / "same.txt").write_text("visible", encoding="utf-8")
+    (entry_source / "same.txt").write_text("entry data", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="ZIP entry name duplicates a visible file"):
+        archiver.initialize_container(
+            tmp_path / "vault.zip",
+            size_mb=1,
+            slot_count=4,
+            zip_wrapper=ZipWrapperOptions(
+                enabled=True,
+                visible_source_dir=visible,
+                encrypted_entry_source_dir=entry_source,
+                encrypted_entry_password="zip entry password",
+                encrypted_entry_mode=ZIP_ENTRY_MODE_FILES,
+            ),
+        )
 
 
 def test_zip_wrapper_visible_only_passes_infozip_test(tmp_path):
