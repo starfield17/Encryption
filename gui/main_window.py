@@ -23,24 +23,35 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QStatusBar,
     QTableWidget,
+    QTableWidgetItem,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from core.archiver import DEFAULT_CONTAINER_SIZE_MB, DEFAULT_SLOT_COUNT
+from core.archiver import (
+    DEFAULT_CONTAINER_SIZE_MB,
+    DEFAULT_SLOT_COUNT,
+    NONCE_LEN,
+    PAYLOAD_HEADER_LEN,
+    SALT_LEN,
+    TAG_LEN,
+)
 from core.config_store import load_app_config, load_preset, update_app_config
 from core.i18n import get_translator
 from gui.theme import apply_theme
 from gui.window_geometry import clamped_window_size
-from gui.workers import CreateContainerWorker, ExtractWorker, PayloadInput, WriteWorker
+from gui.workers import AnalyzePayloadsWorker, CreateContainerWorker, ExtractWorker, PayloadEstimate, PayloadInput, WriteWorker
 
 
 CONTAINER_FILTER = "DARC containers (*.darc *.bin *.img);;All files (*)"
 PAYLOAD_SLOT_COL = 0
 PAYLOAD_SOURCE_COL = 1
-PAYLOAD_PASSWORD_COL = 2
-PAYLOAD_CONFIRM_COL = 3
+PAYLOAD_ESTIMATE_COL = 2
+PAYLOAD_CAPACITY_COL = 3
+PAYLOAD_STATUS_COL = 4
+MIB = 1024 * 1024
+SLOT_OVERHEAD = SALT_LEN + NONCE_LEN + TAG_LEN + PAYLOAD_HEADER_LEN
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +64,13 @@ class MainWindow(QMainWindow):
         self.tr = get_translator(self.language, self.config_dir)
         self.active_worker = None
         self._language_guard = False
+        self._payload_passwords: list[str] = []
+        self._payload_confirms: list[str] = []
+        self._payload_estimates: list[int | None] = []
+        self._payload_estimate_errors: list[str | None] = []
+        self._payload_detail_row: int | None = None
+        self._payload_detail_guard = False
+        self._auto_plan_after_analysis = False
 
         preset = self._load_default_preset()
         self.default_container_size_mb = int(preset.get("container_size_mb", DEFAULT_CONTAINER_SIZE_MB))
@@ -148,27 +166,47 @@ class MainWindow(QMainWindow):
 
         self.payload_box = QGroupBox()
         payload_layout = QVBoxLayout(self.payload_box)
-        self.payload_table = QTableWidget(0, 4)
+        self.payload_table = QTableWidget(0, 5)
         self.payload_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.payload_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.payload_table.verticalHeader().setVisible(False)
         self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_SLOT_COL, QHeaderView.ResizeToContents)
         self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_SOURCE_COL, QHeaderView.Stretch)
-        self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_PASSWORD_COL, QHeaderView.ResizeToContents)
-        self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_CONFIRM_COL, QHeaderView.ResizeToContents)
+        self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_ESTIMATE_COL, QHeaderView.ResizeToContents)
+        self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_CAPACITY_COL, QHeaderView.ResizeToContents)
+        self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_STATUS_COL, QHeaderView.ResizeToContents)
         self.payload_table.setMinimumHeight(170)
         payload_layout.addWidget(self.payload_table)
 
         payload_buttons = QHBoxLayout()
         self.add_payload_button = QPushButton()
         self.remove_payload_button = QPushButton()
+        self.analyze_payloads_button = QPushButton()
+        self.auto_plan_button = QPushButton()
         self.auto_assign_button = QPushButton()
         payload_buttons.addWidget(self.add_payload_button)
         payload_buttons.addWidget(self.remove_payload_button)
+        payload_buttons.addWidget(self.analyze_payloads_button)
+        payload_buttons.addWidget(self.auto_plan_button)
         payload_buttons.addWidget(self.auto_assign_button)
         payload_buttons.addStretch(1)
         payload_layout.addLayout(payload_buttons)
         layout.addWidget(self.payload_box, 1)
+
+        self.payload_detail_box = QGroupBox()
+        detail_layout = QGridLayout(self.payload_detail_box)
+        self.detail_password_label = QLabel()
+        self.detail_password_edit = QLineEdit()
+        self.detail_password_edit.setEchoMode(QLineEdit.Password)
+        self.detail_confirm_label = QLabel()
+        self.detail_confirm_edit = QLineEdit()
+        self.detail_confirm_edit.setEchoMode(QLineEdit.Password)
+        detail_layout.addWidget(self.detail_password_label, 0, 0)
+        detail_layout.addWidget(self.detail_password_edit, 0, 1)
+        detail_layout.addWidget(self.detail_confirm_label, 1, 0)
+        detail_layout.addWidget(self.detail_confirm_edit, 1, 1)
+        detail_layout.setColumnStretch(1, 1)
+        layout.addWidget(self.payload_detail_box)
 
         bottom_layout = QHBoxLayout()
         self.create_hint_label = QLabel()
@@ -301,8 +339,15 @@ class MainWindow(QMainWindow):
         self.create_container_button.clicked.connect(self._browse_create_container)
         self.add_payload_button.clicked.connect(self._add_payload_from_button)
         self.remove_payload_button.clicked.connect(self._remove_selected_payload)
+        self.analyze_payloads_button.clicked.connect(self._run_analyze_payloads)
+        self.auto_plan_button.clicked.connect(self._run_auto_plan)
         self.auto_assign_button.clicked.connect(self._auto_assign_slots)
         self.create_slots_spin.valueChanged.connect(self._sync_slot_index_limits)
+        self.create_slots_spin.valueChanged.connect(self._refresh_payload_planning)
+        self.create_size_spin.valueChanged.connect(self._refresh_payload_planning)
+        self.payload_table.itemSelectionChanged.connect(self._payload_selection_changed)
+        self.detail_password_edit.textChanged.connect(self._detail_password_changed)
+        self.detail_confirm_edit.textChanged.connect(self._detail_confirm_changed)
         self.create_run_button.clicked.connect(self._run_create)
         self.write_container_button.clicked.connect(lambda: self._browse_open_file(self.write_container_edit))
         self.write_source_button.clicked.connect(lambda: self._browse_directory(self.write_source_edit))
@@ -327,18 +372,25 @@ class MainWindow(QMainWindow):
         self.payload_box.setTitle(self.tr.t("gui.group.payload_slots"))
         self.add_payload_button.setText(self.tr.t("gui.button.add_payload"))
         self.remove_payload_button.setText(self.tr.t("gui.button.remove_payload"))
-        self.auto_assign_button.setText(self.tr.t("gui.button.auto_assign_slot"))
+        self.analyze_payloads_button.setText(self.tr.t("gui.button.analyze_payloads"))
+        self.auto_plan_button.setText(self.tr.t("gui.button.auto_plan"))
+        self.auto_assign_button.setText(self.tr.t("gui.button.auto_assign_slots"))
         self.create_run_button.setText(self.tr.t("gui.button.create"))
         self.create_hint_label.setText(self.tr.t("gui.hint.payloads"))
         self.payload_table.setHorizontalHeaderLabels(
             [
                 self.tr.t("gui.table.slot"),
                 self.tr.t("gui.table.source_dir"),
-                self.tr.t("gui.table.password"),
-                self.tr.t("gui.table.confirm_password"),
+                self.tr.t("gui.table.estimated_zip"),
+                self.tr.t("gui.table.slot_capacity"),
+                self.tr.t("gui.table.status"),
             ]
         )
+        self.payload_detail_box.setTitle(self.tr.t("gui.group.selected_payload"))
+        self.detail_password_label.setText(self.tr.t("gui.label.password"))
+        self.detail_confirm_label.setText(self.tr.t("gui.label.confirm_password"))
         self._sync_payload_row_translations()
+        self._refresh_payload_planning()
 
         self.write_box.setTitle(self.tr.t("gui.group.write_slot"))
         self.write_container_label.setText(self.tr.t("gui.label.container"))
@@ -354,7 +406,7 @@ class MainWindow(QMainWindow):
         self.extract_box.setTitle(self.tr.t("gui.group.extract"))
         self.extract_container_label.setText(self.tr.t("gui.label.container"))
         self.extract_output_label.setText(self.tr.t("gui.label.output_dir"))
-        self.extract_slots_label.setText(self.tr.t("gui.label.slot_count"))
+        self.extract_slots_label.setText(self.tr.t("gui.label.slot_count_created"))
         self.extract_password_label.setText(self.tr.t("gui.label.password"))
         self.extract_container_button.setText(self.tr.t("gui.button.browse_file"))
         self.extract_output_button.setText(self.tr.t("gui.button.browse_dir"))
@@ -432,6 +484,10 @@ class MainWindow(QMainWindow):
     def _add_payload_row(self, slot_index: int | None = None, source_dir: str = "", password: str = "", confirm: str = "") -> None:
         row = self.payload_table.rowCount()
         self.payload_table.insertRow(row)
+        self._payload_passwords.append(password)
+        self._payload_confirms.append(confirm)
+        self._payload_estimates.append(None)
+        self._payload_estimate_errors.append(None)
 
         slot_spin = QSpinBox()
         slot_spin.setRange(0, max(0, self.create_slots_spin.value() - 1))
@@ -443,20 +499,20 @@ class MainWindow(QMainWindow):
         source_layout.setContentsMargins(0, 0, 0, 0)
         source_edit = QLineEdit(source_dir)
         source_edit.setPlaceholderText(self.tr.t("gui.placeholder.source_dir"))
+        source_edit.textChanged.connect(self._payload_sources_changed)
         source_button = QPushButton(self.tr.t("gui.button.browse_dir"))
         source_button.clicked.connect(lambda _checked=False, edit=source_edit: self._browse_directory(edit))
         source_layout.addWidget(source_edit, 1)
         source_layout.addWidget(source_button)
         self.payload_table.setCellWidget(row, PAYLOAD_SOURCE_COL, source_wrapper)
 
-        password_edit = QLineEdit(password)
-        password_edit.setEchoMode(QLineEdit.Password)
-        self.payload_table.setCellWidget(row, PAYLOAD_PASSWORD_COL, password_edit)
-
-        confirm_edit = QLineEdit(confirm)
-        confirm_edit.setEchoMode(QLineEdit.Password)
-        self.payload_table.setCellWidget(row, PAYLOAD_CONFIRM_COL, confirm_edit)
+        for column in (PAYLOAD_ESTIMATE_COL, PAYLOAD_CAPACITY_COL, PAYLOAD_STATUS_COL):
+            item = QTableWidgetItem()
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.payload_table.setItem(row, column, item)
+        self._refresh_payload_row(row)
         self.payload_table.selectRow(row)
+        self._load_payload_detail(row)
 
     def _remove_selected_payload(self) -> None:
         row = self.payload_table.currentRow()
@@ -464,24 +520,25 @@ class MainWindow(QMainWindow):
             self._show_warning(self.tr.t("gui.message.select_payload"))
             return
         self.payload_table.removeRow(row)
+        del self._payload_passwords[row]
+        del self._payload_confirms[row]
+        del self._payload_estimates[row]
+        del self._payload_estimate_errors[row]
+        if self.payload_table.rowCount() == 0:
+            self._load_payload_detail(None)
+        else:
+            self.payload_table.selectRow(min(row, self.payload_table.rowCount() - 1))
+            self._load_payload_detail(self.payload_table.currentRow())
 
     def _auto_assign_slots(self) -> None:
-        rows = self._selected_payload_rows() or list(range(self.payload_table.rowCount()))
+        rows = list(range(self.payload_table.rowCount()))
         slot_count = self.create_slots_spin.value()
-        used_slots = {
-            self._payload_slot_spin(row).value()
-            for row in range(self.payload_table.rowCount())
-            if row not in rows
-        }
-        available_slots = [slot for slot in range(slot_count) if slot not in used_slots]
-        if len(available_slots) < len(rows):
+        if len(rows) > slot_count:
             self._show_warning(self.tr.t("gui.message.not_enough_slots"))
             return
-        for row, slot in zip(rows, available_slots):
+        for row, slot in zip(rows, self._spread_slot_indexes(len(rows), slot_count)):
             self._payload_slot_spin(row).setValue(slot)
-
-    def _selected_payload_rows(self) -> list[int]:
-        return sorted({index.row() for index in self.payload_table.selectedIndexes()})
+        self._refresh_payload_planning()
 
     def _next_unused_slot(self) -> int | None:
         used = {self._payload_slot_spin(row).value() for row in range(self.payload_table.rowCount())}
@@ -489,6 +546,33 @@ class MainWindow(QMainWindow):
             if slot not in used:
                 return slot
         return None
+
+    def _spread_slot_indexes(self, payload_count: int, slot_count: int) -> list[int]:
+        if payload_count <= 0:
+            return []
+        if payload_count > slot_count:
+            return []
+        if payload_count == 1:
+            return [0]
+        if payload_count == 2:
+            if slot_count == 4:
+                return [0, 2]
+            if slot_count >= 8:
+                return [1, max(1, (slot_count * 3 // 4) - 1)]
+            return [0, slot_count - 1]
+
+        slots = [round(index * max(1, slot_count - 2) / (payload_count - 1)) for index in range(payload_count)]
+        used: set[int] = set()
+        result: list[int] = []
+        for slot in slots:
+            slot = max(0, min(slot_count - 1, slot))
+            while slot in used and slot + 1 < slot_count:
+                slot += 1
+            while slot in used and slot > 0:
+                slot -= 1
+            used.add(slot)
+            result.append(slot)
+        return result
 
     def _payload_slot_spin(self, row: int) -> QSpinBox:
         widget = self.payload_table.cellWidget(row, PAYLOAD_SLOT_COL)
@@ -514,22 +598,207 @@ class MainWindow(QMainWindow):
             raise RuntimeError("Payload source cell is not a button")
         return button
 
-    def _payload_password_edit(self, row: int) -> QLineEdit:
-        widget = self.payload_table.cellWidget(row, PAYLOAD_PASSWORD_COL)
-        if not isinstance(widget, QLineEdit):
-            raise RuntimeError("Payload password cell is not a line edit")
-        return widget
-
-    def _payload_confirm_edit(self, row: int) -> QLineEdit:
-        widget = self.payload_table.cellWidget(row, PAYLOAD_CONFIRM_COL)
-        if not isinstance(widget, QLineEdit):
-            raise RuntimeError("Payload confirmation cell is not a line edit")
-        return widget
-
     def _sync_payload_row_translations(self) -> None:
         for row in range(self.payload_table.rowCount()):
             self._payload_source_edit(row).setPlaceholderText(self.tr.t("gui.placeholder.source_dir"))
             self._payload_source_button(row).setText(self.tr.t("gui.button.browse_dir"))
+            self._refresh_payload_row(row)
+
+    def _payload_selection_changed(self) -> None:
+        row = self.payload_table.currentRow()
+        self._load_payload_detail(row if row >= 0 else None)
+
+    def _load_payload_detail(self, row: int | None) -> None:
+        self._payload_detail_guard = True
+        self._payload_detail_row = row
+        if row is None or row >= len(self._payload_passwords):
+            self.detail_password_edit.clear()
+            self.detail_confirm_edit.clear()
+            self.detail_password_edit.setEnabled(False)
+            self.detail_confirm_edit.setEnabled(False)
+        else:
+            self.detail_password_edit.setEnabled(True)
+            self.detail_confirm_edit.setEnabled(True)
+            self.detail_password_edit.setText(self._payload_passwords[row])
+            self.detail_confirm_edit.setText(self._payload_confirms[row])
+        self._payload_detail_guard = False
+
+    def _detail_password_changed(self, text: str) -> None:
+        if self._payload_detail_guard or self._payload_detail_row is None:
+            return
+        if self._payload_detail_row < len(self._payload_passwords):
+            self._payload_passwords[self._payload_detail_row] = text
+
+    def _detail_confirm_changed(self, text: str) -> None:
+        if self._payload_detail_guard or self._payload_detail_row is None:
+            return
+        if self._payload_detail_row < len(self._payload_confirms):
+            self._payload_confirms[self._payload_detail_row] = text
+
+    def _payload_sources_changed(self) -> None:
+        for row in range(self.payload_table.rowCount()):
+            self._payload_estimates[row] = None
+            self._payload_estimate_errors[row] = None
+        self._refresh_payload_planning()
+
+    def _container_size_bytes(self) -> int:
+        return self.create_size_spin.value() * MIB
+
+    def _slot_capacity_bytes(self, size_mb: int | None = None, slot_count: int | None = None) -> int:
+        size_bytes = (self.create_size_spin.value() if size_mb is None else size_mb) * MIB
+        slots = self.create_slots_spin.value() if slot_count is None else slot_count
+        if slots <= 0:
+            return 0
+        return max(0, size_bytes // slots - SLOT_OVERHEAD)
+
+    def _format_size(self, size_bytes: int | None) -> str:
+        if size_bytes is None:
+            return "-"
+        return f"{size_bytes / MIB:.2f} MiB"
+
+    def _status_text_for_row(self, row: int) -> str:
+        if self._payload_estimate_errors[row]:
+            return self.tr.t("gui.status_payload.error")
+        estimate = self._payload_estimates[row]
+        if estimate is None:
+            return self.tr.t("gui.status_payload.not_analyzed")
+        if estimate <= self._slot_capacity_bytes():
+            return self.tr.t("gui.status_payload.ok")
+        return self.tr.t("gui.status_payload.too_large")
+
+    def _refresh_payload_row(self, row: int) -> None:
+        estimate = self._payload_estimates[row] if row < len(self._payload_estimates) else None
+        values = {
+            PAYLOAD_ESTIMATE_COL: self._format_size(estimate),
+            PAYLOAD_CAPACITY_COL: self._format_size(self._slot_capacity_bytes()),
+            PAYLOAD_STATUS_COL: self._status_text_for_row(row),
+        }
+        for column, value in values.items():
+            item = self.payload_table.item(row, column)
+            if item is None:
+                item = QTableWidgetItem()
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.payload_table.setItem(row, column, item)
+            item.setText(value)
+
+    def _refresh_payload_planning(self) -> None:
+        for row in range(self.payload_table.rowCount()):
+            self._refresh_payload_row(row)
+
+    def _analysis_sources(self) -> tuple[list[tuple[int, Path]] | None, str | None]:
+        if self.payload_table.rowCount() == 0:
+            return None, self.tr.t("gui.message.no_payloads")
+        sources: list[tuple[int, Path]] = []
+        for row in range(self.payload_table.rowCount()):
+            source_raw = self._payload_source_edit(row).text().strip()
+            if not source_raw:
+                return None, self.tr.t("gui.message.select_source")
+            source_dir = Path(source_raw)
+            if not source_dir.exists() or not source_dir.is_dir():
+                return None, self.tr.t("gui.message.source_missing")
+            sources.append((row, source_dir))
+        return sources, None
+
+    def _run_analyze_payloads(self) -> None:
+        sources, error = self._analysis_sources()
+        if error is not None:
+            self._auto_plan_after_analysis = False
+            self._show_warning(error)
+            return
+        if sources is None:
+            self._auto_plan_after_analysis = False
+            return
+        worker = AnalyzePayloadsWorker(sources)
+        self._start_worker(worker, self.tr.t("gui.status.analyzing"), completed_handler=self._analysis_completed)
+
+    def _analysis_completed(self, estimates: list[PayloadEstimate]) -> None:
+        for estimate in estimates:
+            if estimate.row_index >= self.payload_table.rowCount():
+                continue
+            current_source = Path(self._payload_source_edit(estimate.row_index).text().strip())
+            if current_source != estimate.source_dir:
+                continue
+            self._payload_estimates[estimate.row_index] = estimate.zip_size
+            self._payload_estimate_errors[estimate.row_index] = estimate.error
+        self._refresh_payload_planning()
+        self._finish_worker(self.tr.t("gui.message.analysis_complete"))
+        if self._auto_plan_after_analysis:
+            self._auto_plan_after_analysis = False
+            self._apply_auto_plan()
+
+    def _run_auto_plan(self) -> None:
+        if self.payload_table.rowCount() == 0:
+            self._show_warning(self.tr.t("gui.message.no_payloads"))
+            return
+        if any(estimate is None for estimate in self._payload_estimates):
+            self._auto_plan_after_analysis = True
+            self._run_analyze_payloads()
+            return
+        self._apply_auto_plan()
+
+    def _recommended_slot_count(self, payload_count: int) -> int:
+        if payload_count <= 2:
+            return 4
+        if payload_count == 3:
+            return 6
+        value = payload_count + 2
+        return value if value % 2 == 0 else value + 1
+
+    def _compatible_size_mib(self, size_mib: int, slot_count: int) -> int:
+        size_mib = max(1, size_mib)
+        while (size_mib * MIB) % slot_count != 0:
+            size_mib += 1
+        return size_mib
+
+    def _recommended_size_mib(self, max_zip_size: int, slot_count: int) -> int:
+        required_slot_size = int((max_zip_size + SLOT_OVERHEAD) * 1.10) + 1
+        raw_size_mib = (required_slot_size * slot_count + MIB - 1) // MIB
+        if raw_size_mib > 10:
+            raw_size_mib = ((raw_size_mib + 9) // 10) * 10
+        return self._compatible_size_mib(raw_size_mib, slot_count)
+
+    def _apply_auto_plan(self) -> None:
+        payload_count = self.payload_table.rowCount()
+        if payload_count == 0:
+            self._show_warning(self.tr.t("gui.message.no_payloads"))
+            return
+        errors = [error for error in self._payload_estimate_errors if error]
+        if errors:
+            self._show_warning(self.tr.t("gui.message.analysis_has_errors"))
+            return
+
+        current_slots = self.create_slots_spin.value()
+        recommended_slots = max(current_slots, self._recommended_slot_count(payload_count)) if current_slots < payload_count else current_slots
+        estimates = [estimate for estimate in self._payload_estimates if estimate is not None]
+        max_zip_size = max(estimates) if estimates else 0
+        current_size = self.create_size_spin.value()
+        recommended_size = current_size
+        if max_zip_size > self._slot_capacity_bytes(current_size, recommended_slots):
+            recommended_size = max(current_size, self._recommended_size_mib(max_zip_size, recommended_slots))
+        recommended_size = self._compatible_size_mib(recommended_size, recommended_slots)
+
+        changes: list[str] = []
+        if recommended_slots != current_slots:
+            changes.append(self.tr.t("gui.message.recommend_slot_count", count=recommended_slots))
+        if recommended_size != current_size:
+            changes.append(self.tr.t("gui.message.recommend_size", size=recommended_size))
+        if not changes:
+            self._set_status(self.tr.t("gui.message.plan_fits"))
+            return
+
+        message = "\n".join(changes + [self.tr.t("gui.message.apply_recommendation")])
+        result = QMessageBox.question(
+            self,
+            self.tr.t("gui.message.info"),
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if result == QMessageBox.Yes:
+            self.create_slots_spin.setValue(recommended_slots)
+            self.create_size_spin.setValue(recommended_size)
+            self._auto_assign_slots()
+            self._set_status(self.tr.t("gui.message.plan_applied"))
 
     def _collect_create_payloads(self) -> tuple[list[PayloadInput] | None, str | None]:
         if self.payload_table.rowCount() == 0:
@@ -537,6 +806,9 @@ class MainWindow(QMainWindow):
         payloads: list[PayloadInput] = []
         seen_slots: set[int] = set()
         slot_count = self.create_slots_spin.value()
+        if self._container_size_bytes() % slot_count != 0:
+            return None, self.tr.t("gui.message.container_size_not_divisible")
+        slot_capacity = self._slot_capacity_bytes()
         for row in range(self.payload_table.rowCount()):
             slot_index = self._payload_slot_spin(row).value()
             if not 0 <= slot_index < slot_count:
@@ -552,11 +824,28 @@ class MainWindow(QMainWindow):
             if not source_dir.exists() or not source_dir.is_dir():
                 return None, self.tr.t("gui.message.source_missing")
 
-            password = self._payload_password_edit(row).text()
-            if password != self._payload_confirm_edit(row).text():
+            password = self._payload_passwords[row]
+            if password != self._payload_confirms[row]:
                 return None, self.tr.t("gui.message.password_mismatch")
             payloads.append(PayloadInput(slot_index=slot_index, source_dir=source_dir, password=password))
+
+        for row in range(self.payload_table.rowCount()):
+            if self._payload_estimate_errors[row]:
+                return None, self.tr.t("gui.message.analysis_has_errors")
+            estimate = self._payload_estimates[row]
+            if estimate is None:
+                return None, self.tr.t("gui.message.analysis_required")
+            if estimate > slot_capacity:
+                return None, self.tr.t("gui.message.payload_too_large_for_plan")
         return payloads, None
+
+    def _has_duplicate_passwords(self, payloads: list[PayloadInput]) -> bool:
+        seen: set[str] = set()
+        for payload in payloads:
+            if payload.password in seen:
+                return True
+            seen.add(payload.password)
+        return False
 
     def _run_create(self) -> None:
         container = self._required_path(self.create_container_edit, "gui.message.select_container")
@@ -568,6 +857,16 @@ class MainWindow(QMainWindow):
             return
         if payloads is None:
             return
+        if self._has_duplicate_passwords(payloads):
+            result = QMessageBox.question(
+                self,
+                self.tr.t("gui.message.warning"),
+                self.tr.t("gui.message.duplicate_passwords"),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if result != QMessageBox.Yes:
+                return
         if container.exists():
             result = QMessageBox.question(
                 self,
@@ -626,12 +925,12 @@ class MainWindow(QMainWindow):
             return None
         return Path(raw)
 
-    def _start_worker(self, worker, status_text: str) -> None:
+    def _start_worker(self, worker, status_text: str, completed_handler=None) -> None:
         if self.active_worker is not None:
             self._show_warning(self.tr.t("gui.message.busy"))
             return
         self.active_worker = worker
-        worker.completed.connect(self._worker_completed)
+        worker.completed.connect(completed_handler or self._worker_completed)
         worker.failed.connect(self._worker_failed)
         worker.finished.connect(worker.deleteLater)
         self._set_busy(True)

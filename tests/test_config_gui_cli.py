@@ -78,6 +78,9 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
         assert window.tabs.tabText(0) == "Create"
         assert window.tabs.tabText(1) == "Write Slot"
         assert window.payload_table.rowCount() == 1
+        assert window.payload_table.columnCount() == 5
+        assert window.payload_detail_box.title() == "Selected payload"
+        assert window.extract_slots_label.text() == "Slot count used when created"
         assert not hasattr(window, "runtime_box")
         assert window.tabs.widget(3) is window.settings_tab
     finally:
@@ -98,7 +101,8 @@ def test_gui_create_validation_helpers(monkeypatch, tmp_path):
     source_a.mkdir()
     source_b.mkdir()
     try:
-        window.payload_table.removeRow(0)
+        window.payload_table.selectRow(0)
+        window._remove_selected_payload()
         payloads, error = window._collect_create_payloads()
         assert payloads is None
         assert error == window.tr.t("gui.message.no_payloads")
@@ -112,15 +116,66 @@ def test_gui_create_validation_helpers(monkeypatch, tmp_path):
         window.payload_table.clearSelection()
         window._auto_assign_slots()
         slots = [window._payload_slot_spin(row).value() for row in range(window.payload_table.rowCount())]
-        assert slots == [0, 1]
+        assert slots == [0, 2]
 
-        window._payload_confirm_edit(1).setText("different")
+        window._payload_confirms[1] = "different"
         payloads, error = window._collect_create_payloads()
         assert payloads is None
         assert error == window.tr.t("gui.message.password_mismatch")
     finally:
         window.close()
         app.processEvents()
+
+
+def test_gui_analyze_and_auto_plan_helpers(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "large.bin").write_bytes(b"a" * 300_000)
+    try:
+        window.create_size_spin.setValue(1)
+        window._payload_source_edit(0).setText(str(source))
+        window._payload_estimates[0] = 300_000
+        window._refresh_payload_planning()
+        assert window.payload_table.item(0, 4).text() == window.tr.t("gui.status_payload.too_large")
+
+        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+        original_size = window.create_size_spin.value()
+        window._apply_auto_plan()
+
+        assert window.create_size_spin.value() > original_size
+        assert window.payload_table.item(0, 4).text() == window.tr.t("gui.status_payload.ok")
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_analyze_payloads_worker_estimates_zip_size(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from gui.workers import AnalyzePayloadsWorker
+
+    app = QApplication.instance() or QApplication([])
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.txt").write_text("hello", encoding="utf-8")
+    results = []
+
+    worker = AnalyzePayloadsWorker([(0, source)])
+    worker.completed.connect(results.append)
+    worker.run()
+    app.processEvents()
+
+    assert len(results) == 1
+    assert results[0][0].row_index == 0
+    assert results[0][0].zip_size is not None
+    assert results[0][0].zip_size > 0
 
 
 def test_create_container_worker_writes_multiple_payloads(tmp_path):
@@ -160,6 +215,32 @@ def test_create_container_worker_writes_multiple_payloads(tmp_path):
     assert (output_a / "a.txt").read_text(encoding="utf-8") == "alpha"
     assert (output_b / "b.txt").read_text(encoding="utf-8") == "beta"
     assert (output_raw / "decrypted_raw.bin").exists()
+
+
+def test_create_container_worker_failure_preserves_existing_container(tmp_path):
+    from gui.workers import CreateContainerWorker, PayloadInput
+
+    existing = tmp_path / "existing.darc"
+    existing.write_bytes(b"existing-data")
+    before = existing.read_bytes()
+    source = tmp_path / "large-source"
+    source.mkdir()
+    (source / "large.dat").write_bytes(os.urandom(300_000))
+    failures = []
+
+    worker = CreateContainerWorker(
+        existing,
+        1,
+        4,
+        [PayloadInput(slot_index=0, source_dir=source, password="password")],
+        "done",
+    )
+    worker.failed.connect(failures.append)
+    worker.run()
+
+    assert failures
+    assert existing.read_bytes() == before
+    assert not list(tmp_path.glob(f".{existing.name}.*.tmp"))
 
 
 def test_pyinstaller_build_script_help():
