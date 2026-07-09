@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import zipfile
+from io import BytesIO
 from pathlib import Path
 
+import pyzipper
 import pytest
 
 import core.archiver as archiver_module
@@ -31,6 +34,7 @@ def test_language_pack_and_preset_load():
     preset = load_preset("default_standard", config_dir)
     assert preset["container_size_mb"] == 100
     assert preset["slot_count"] == 4
+    assert preset["default_extension"] == ".zip"
     assert archiver_module.SCRYPT_N == 2**12
 
 
@@ -64,8 +68,47 @@ def test_app_config_drops_legacy_recent_paths():
 def test_cli_init_smoke(tmp_path):
     vault = tmp_path / "cli.darc"
 
-    assert run_cli(["init", str(vault), "--size-mb", "1", "--slots", "4"]) == 0
+    assert run_cli(["init", str(vault), "--size-mb", "1", "--slots", "4", "--raw"]) == 0
     assert vault.stat().st_size == 1024 * 1024
+
+
+def test_cli_init_zip_wrapper_with_visible_and_passworded_entry(monkeypatch, tmp_path):
+    vault = tmp_path / "cli.zip"
+    visible = tmp_path / "visible"
+    entry_source = tmp_path / "entry-source"
+    visible.mkdir()
+    entry_source.mkdir()
+    (visible / "readme.txt").write_text("visible", encoding="utf-8")
+    (entry_source / "entry.txt").write_text("entry data", encoding="utf-8")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "zip entry password")
+
+    assert (
+        run_cli(
+            [
+                "init",
+                str(vault),
+                "--size-mb",
+                "1",
+                "--slots",
+                "4",
+                "--visible-source",
+                str(visible),
+                "--passworded-entry-source",
+                str(entry_source),
+            ]
+        )
+        == 0
+    )
+
+    assert archiver_module.DeniableArchiver().slot_region_size(vault) == 1024 * 1024
+    with zipfile.ZipFile(vault) as archive:
+        assert archive.namelist() == ["readme.txt", "archive.zip"]
+        assert archive.read("readme.txt") == b"visible"
+    with pyzipper.AESZipFile(vault) as archive:
+        archive.setpassword(b"zip entry password")
+        inner_zip = archive.read("archive.zip")
+    with zipfile.ZipFile(BytesIO(inner_zip)) as inner:
+        assert inner.read("entry.txt") == b"entry data"
 
 
 def test_cli_write_no_compress_roundtrip(monkeypatch, tmp_path):
@@ -116,6 +159,11 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
         assert window.payload_detail_box.title() == "Selected payload"
         assert window.add_payload_button.text() == "Add Folder"
         assert window.create_compress_check.isChecked()
+        assert window.default_extension == ".zip"
+        assert window.create_container_edit.placeholderText() == "Choose a new .zip container path"
+        assert window.zip_wrapper_check.isChecked()
+        assert window.zip_wrapper_box.title() == "Visible ZIP contents"
+        assert window.zip_entry_name_edit.text() == "archive.zip"
         assert window.write_compress_check.isChecked()
         assert not window.detail_show_password_check.isChecked()
         assert not window.detail_skip_confirm_check.isChecked()
@@ -250,6 +298,58 @@ def test_gui_password_visibility_hint_and_skip_confirm(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_gui_zip_wrapper_validation_helpers(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLineEdit
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    visible = tmp_path / "visible"
+    entry_source = tmp_path / "entry-source"
+    visible.mkdir()
+    entry_source.mkdir()
+    try:
+        wrapper, error = window._collect_zip_wrapper_options()
+        assert error is None
+        assert wrapper is not None
+        assert wrapper.enabled is True
+        assert wrapper.visible_source_dir is None
+
+        window.zip_visible_source_edit.setText(str(visible))
+        window.zip_entry_source_edit.setText(str(entry_source))
+        wrapper, error = window._collect_zip_wrapper_options()
+        assert wrapper is None
+        assert error == window.tr.t("gui.message.passworded_entry_password_required")
+
+        window.zip_entry_password_edit.setText("zip password")
+        window.zip_entry_confirm_edit.setText("different")
+        wrapper, error = window._collect_zip_wrapper_options()
+        assert wrapper is None
+        assert error == window.tr.t("gui.message.password_mismatch")
+
+        window.zip_entry_show_password_check.setChecked(True)
+        assert window.zip_entry_password_edit.echoMode() == QLineEdit.Normal
+        window.zip_entry_confirm_edit.setText("zip password")
+        wrapper, error = window._collect_zip_wrapper_options()
+        assert error is None
+        assert wrapper is not None
+        assert wrapper.visible_source_dir == visible
+        assert wrapper.encrypted_entry_source_dir == entry_source
+        assert wrapper.encrypted_entry_name == "archive.zip"
+        assert wrapper.encrypted_entry_password == "zip password"
+
+        window.zip_wrapper_check.setChecked(False)
+        wrapper, error = window._collect_zip_wrapper_options()
+        assert error is None
+        assert wrapper is None
+        assert not window.zip_visible_source_edit.isEnabled()
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_gui_analyze_and_auto_plan_helpers(monkeypatch, tmp_path):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -327,6 +427,7 @@ def test_create_container_worker_writes_multiple_payloads(tmp_path):
             PayloadInput(slot_index=0, source_dir=source_a, password="alpha password"),
             PayloadInput(slot_index=2, source_dir=source_b, password="beta password"),
         ],
+        None,
         "done",
     )
     worker.run()
@@ -385,6 +486,36 @@ def test_extract_worker_try_common_slot_counts_stays_blind(tmp_path):
     assert not list(tmp_path.glob(".raw-output.*.extract"))
 
 
+def test_extract_worker_try_common_slot_counts_with_zip_wrapper(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from core.archiver import ZipWrapperOptions
+    from gui.workers import ExtractWorker
+
+    app = QApplication.instance() or QApplication([])
+    archiver = archiver_module.DeniableArchiver()
+    visible = tmp_path / "visible"
+    source = tmp_path / "source"
+    visible.mkdir()
+    source.mkdir()
+    (visible / "readme.txt").write_text("visible", encoding="utf-8")
+    (source / "file.txt").write_text("payload", encoding="utf-8")
+    vault = tmp_path / "vault.zip"
+    archiver.initialize_container(vault, size_mb=1, slot_count=4, zip_wrapper=ZipWrapperOptions(enabled=True, visible_source_dir=visible))
+    archiver.write_payload(vault, source, "long unique passphrase", 2, slot_count=4)
+
+    output = tmp_path / "output"
+    completed = []
+    worker = ExtractWorker(vault, "long unique passphrase", output, slot_count=2, try_common_slot_counts=True)
+    worker.completed.connect(completed.append)
+    worker.run()
+    app.processEvents()
+
+    assert completed == [archiver_module.SUCCESS_MESSAGE]
+    assert (output / "file.txt").read_text(encoding="utf-8") == "payload"
+    assert not (output / "decrypted_raw.bin").exists()
+
+
 def test_create_container_worker_failure_preserves_existing_container(tmp_path):
     from gui.workers import CreateContainerWorker, PayloadInput
 
@@ -401,6 +532,7 @@ def test_create_container_worker_failure_preserves_existing_container(tmp_path):
         1,
         4,
         [PayloadInput(slot_index=0, source_dir=source, password="password")],
+        None,
         "done",
     )
     worker.failed.connect(failures.append)
@@ -438,4 +570,4 @@ def test_readme_uses_generic_commands_only():
     ]
     for text in forbidden:
         assert text not in readme
-    assert "python darc.py init vault.darc --size-mb 100 --slots 4" in readme
+    assert "python darc.py init vault.zip --size-mb 100 --slots 4" in readme

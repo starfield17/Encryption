@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
 
+import pyzipper
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
@@ -37,6 +38,11 @@ KEY_LEN = 32
 RAW_DUMP_SIZE = 1024 * 1024
 RANDOM_WRITE_CHUNK = 1024 * 1024
 MAX_ZIP_FILES = 10_000
+ZIP_EOCD_SIGNATURE = b"PK\x05\x06"
+ZIP_CENTRAL_DIRECTORY_SIGNATURE = b"PK\x01\x02"
+ZIP_EOCD_LEN = 22
+ZIP_MAX_COMMENT_LEN = 65_535
+DEFAULT_WRAPPER_ENTRY_NAME = "archive.zip"
 
 SUCCESS_MESSAGE = "Extraction complete."
 RAW_DUMP_MESSAGE = "Extraction complete. File system signatures not recognized; output dumped as raw binary."
@@ -53,24 +59,37 @@ class ExtractionResult:
     output_dir: Path
 
 
+@dataclass(frozen=True)
+class ZipWrapperOptions:
+    enabled: bool = False
+    visible_source_dir: Path | None = None
+    encrypted_entry_source_dir: Path | None = None
+    encrypted_entry_name: str = DEFAULT_WRAPPER_ENTRY_NAME
+    encrypted_entry_password: str | None = None
+
+
 class DeniableArchiver:
-    def initialize_container(self, container_path: str | Path, size_mb: int = DEFAULT_CONTAINER_SIZE_MB, slot_count: int = DEFAULT_SLOT_COUNT) -> None:
+    def initialize_container(
+        self,
+        container_path: str | Path,
+        size_mb: int = DEFAULT_CONTAINER_SIZE_MB,
+        slot_count: int = DEFAULT_SLOT_COUNT,
+        zip_wrapper: ZipWrapperOptions | None = None,
+    ) -> None:
         if size_mb <= 0:
             raise ValueError("size_mb must be greater than 0")
         self._validate_slot_count(slot_count)
 
-        container_size = int(size_mb) * 1024 * 1024
-        if container_size % slot_count != 0:
+        slot_region_size = int(size_mb) * 1024 * 1024
+        if slot_region_size % slot_count != 0:
             raise ValueError("Container size must be divisible by slot count")
-        self._validate_slot_size(container_size // slot_count)
+        self._validate_slot_size(slot_region_size // slot_count)
 
-        remaining = container_size
         path = Path(container_path)
         with path.open("wb") as handle:
-            while remaining:
-                chunk_size = min(RANDOM_WRITE_CHUNK, remaining)
-                handle.write(os.urandom(chunk_size))
-                remaining -= chunk_size
+            self._write_random_region(handle, slot_region_size)
+            if zip_wrapper is not None and zip_wrapper.enabled:
+                handle.write(self._build_zip_wrapper(zip_wrapper, slot_region_size))
 
     def write_payload(
         self,
@@ -88,8 +107,8 @@ class DeniableArchiver:
         if not source.exists() or not source.is_dir():
             raise FileNotFoundError(f"Source directory does not exist: {source}")
 
-        container_size = container.stat().st_size
-        slot_size = self._get_slot_size(container_size, slot_count)
+        slot_region_size = self.slot_region_size(container)
+        slot_size = self._get_slot_size(slot_region_size, slot_count)
         if not 0 <= slot_index < slot_count:
             raise ValueError("slot_index out of range")
 
@@ -123,8 +142,8 @@ class DeniableArchiver:
 
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
-        container_size = container.stat().st_size
-        slot_size = self._get_slot_size(container_size, slot_count)
+        slot_region_size = self.slot_region_size(container)
+        slot_size = self._get_slot_size(slot_region_size, slot_count)
         blob_len = self._slot_plaintext_len(slot_size)
 
         first_valid_zip: bytes | None = None
@@ -150,9 +169,137 @@ class DeniableArchiver:
 
         return self._blind_raw_dump(container, password, output)
 
+    def slot_region_size(self, container_path: str | Path) -> int:
+        container = Path(container_path)
+        container_size = container.stat().st_size
+        zip_offset = self.zip_suffix_offset(container)
+        if zip_offset is None:
+            return container_size
+        return zip_offset
+
+    def zip_suffix_offset(self, container_path: str | Path) -> int | None:
+        container = Path(container_path)
+        file_size = container.stat().st_size
+        tail_len = min(file_size, ZIP_EOCD_LEN + ZIP_MAX_COMMENT_LEN)
+        with container.open("rb") as handle:
+            handle.seek(file_size - tail_len)
+            tail = handle.read(tail_len)
+
+        search_end = len(tail)
+        while True:
+            index = tail.rfind(ZIP_EOCD_SIGNATURE, 0, search_end)
+            if index < 0:
+                return None
+            offset = self._parse_zip_suffix_offset(container, file_size, tail, index)
+            if offset is not None:
+                return offset
+            search_end = index
+
     def _derive_key(self, password: str, salt: bytes) -> bytes:
         kdf = Scrypt(salt=salt, length=KEY_LEN, n=SCRYPT_N, r=SCRYPT_R, p=SCRYPT_P)
         return kdf.derive(password.encode("utf-8"))
+
+    def _write_random_region(self, handle: BinaryIO, size: int) -> None:
+        remaining = size
+        while remaining:
+            chunk_size = min(RANDOM_WRITE_CHUNK, remaining)
+            handle.write(os.urandom(chunk_size))
+            remaining -= chunk_size
+
+    def _parse_zip_suffix_offset(self, container: Path, file_size: int, tail: bytes, eocd_tail_index: int) -> int | None:
+        if eocd_tail_index + ZIP_EOCD_LEN > len(tail):
+            return None
+        eocd_abs = file_size - len(tail) + eocd_tail_index
+        (
+            _signature,
+            disk_number,
+            central_disk,
+            disk_entries,
+            total_entries,
+            central_size,
+            central_offset,
+            comment_len,
+        ) = struct.unpack("<4s4H2LH", tail[eocd_tail_index : eocd_tail_index + ZIP_EOCD_LEN])
+        if comment_len != file_size - eocd_abs - ZIP_EOCD_LEN:
+            return None
+        if disk_number != 0 or central_disk != 0 or disk_entries != total_entries:
+            return None
+        if central_size == 0xFFFFFFFF or central_offset == 0xFFFFFFFF:
+            return None
+        central_start = eocd_abs - central_size
+        if central_start < 0:
+            return None
+        if total_entries and not self._has_central_directory_signature(container, central_start):
+            return None
+        prefix_offset = self._prefix_offset_from_central_directory(container, central_start, central_size, central_offset, total_entries)
+        if prefix_offset is None:
+            return None
+        try:
+            with zipfile.ZipFile(container) as archive:
+                archive.infolist()
+        except zipfile.BadZipFile:
+            return None
+        return prefix_offset
+
+    def _has_central_directory_signature(self, container: Path, offset: int) -> bool:
+        try:
+            with container.open("rb") as handle:
+                handle.seek(offset)
+                return handle.read(4) == ZIP_CENTRAL_DIRECTORY_SIGNATURE
+        except OSError:
+            return False
+
+    def _prefix_offset_from_central_directory(
+        self,
+        container: Path,
+        central_start: int,
+        central_size: int,
+        central_offset: int,
+        total_entries: int,
+    ) -> int | None:
+        if total_entries == 0:
+            prefix_offset = central_start - central_offset
+            return prefix_offset if prefix_offset >= 0 else None
+
+        entries = self._central_directory_local_offsets(container, central_start, central_size, total_entries)
+        if not entries:
+            return None
+
+        relative_prefix = central_start - central_offset
+        if relative_prefix >= 0 and (relative_prefix > 0 or entries[0] == 0) and self._has_local_file_signature(container, relative_prefix + entries[0]):
+            return relative_prefix
+
+        absolute_prefix = min(entries)
+        if absolute_prefix >= 0 and self._has_local_file_signature(container, absolute_prefix):
+            return absolute_prefix
+        return None
+
+    def _central_directory_local_offsets(self, container: Path, central_start: int, central_size: int, total_entries: int) -> list[int]:
+        offsets: list[int] = []
+        with container.open("rb") as handle:
+            handle.seek(central_start)
+            consumed = 0
+            while consumed < central_size and len(offsets) < total_entries:
+                fixed = handle.read(46)
+                if len(fixed) != 46 or fixed[:4] != ZIP_CENTRAL_DIRECTORY_SIGNATURE:
+                    return []
+                name_len, extra_len, comment_len = struct.unpack("<HHH", fixed[28:34])
+                local_offset = struct.unpack("<L", fixed[42:46])[0]
+                skip_len = name_len + extra_len + comment_len
+                handle.seek(skip_len, io.SEEK_CUR)
+                consumed += 46 + skip_len
+                offsets.append(local_offset)
+        return offsets
+
+    def _has_local_file_signature(self, container: Path, offset: int) -> bool:
+        if offset < 0:
+            return False
+        try:
+            with container.open("rb") as handle:
+                handle.seek(offset)
+                return handle.read(4) == b"PK\x03\x04"
+        except OSError:
+            return False
 
     def _validate_slot_count(self, slot_count: int) -> None:
         if slot_count < 2:
@@ -203,20 +350,109 @@ class DeniableArchiver:
         return zip_bytes
 
     def _zip_directory(self, source_dir: Path, compress: bool = True) -> bytes:
-        source_root = source_dir.resolve()
         buffer = io.BytesIO()
         compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
-        with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
-            for item in sorted(source_root.rglob("*")):
-                if item.is_symlink():
-                    raise ValueError(f"Source directory contains an unsupported symlink: {item}")
-                if item.is_dir():
-                    continue
-                if not item.is_file():
-                    raise ValueError(f"Source directory contains an unsupported file type: {item}")
-                arcname = item.resolve().relative_to(source_root).as_posix()
-                archive.write(item, arcname)
+        with zipfile.ZipFile(buffer, "w", compression=compression, allowZip64=False) as archive:
+            self._write_directory_entries(archive, source_dir)
         return buffer.getvalue()
+
+    def _build_zip_wrapper(self, options: ZipWrapperOptions, prefix_len: int) -> bytes:
+        buffer = io.BytesIO()
+        written_names: set[str] = set()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=False) as archive:
+            if options.visible_source_dir is not None:
+                self._write_directory_entries(archive, options.visible_source_dir, written_names)
+
+        if options.encrypted_entry_source_dir is not None:
+            if not options.encrypted_entry_password:
+                raise ValueError("ZIP entry password is required")
+            entry_name = self._normalize_zip_entry_name(options.encrypted_entry_name)
+            if entry_name in written_names:
+                raise ValueError("ZIP entry name duplicates a visible file")
+            inner_zip = self._zip_directory(Path(options.encrypted_entry_source_dir), compress=True)
+            buffer.seek(0, io.SEEK_END)
+            with pyzipper.AESZipFile(
+                buffer,
+                "a",
+                compression=zipfile.ZIP_DEFLATED,
+                encryption=pyzipper.WZ_AES,
+                allowZip64=False,
+            ) as archive:
+                archive.setpassword(options.encrypted_entry_password.encode("utf-8"))
+                archive.writestr(entry_name, inner_zip)
+            written_names.add(entry_name)
+
+        wrapper = buffer.getvalue()
+        if written_names:
+            return self._adjust_zip_offsets(wrapper, prefix_len)
+        return wrapper
+
+    def _adjust_zip_offsets(self, zip_bytes: bytes, prefix_len: int) -> bytes:
+        if prefix_len <= 0:
+            return zip_bytes
+        data = bytearray(zip_bytes)
+        eocd_offset = data.rfind(ZIP_EOCD_SIGNATURE)
+        if eocd_offset < 0 or eocd_offset + ZIP_EOCD_LEN > len(data):
+            raise ValueError("ZIP wrapper is missing an end record")
+        total_entries = struct.unpack("<H", data[eocd_offset + 10 : eocd_offset + 12])[0]
+        central_size = struct.unpack("<L", data[eocd_offset + 12 : eocd_offset + 16])[0]
+        central_offset = struct.unpack("<L", data[eocd_offset + 16 : eocd_offset + 20])[0]
+        if central_offset + central_size > len(data):
+            raise ValueError("ZIP wrapper central directory is invalid")
+        self._write_u32(data, eocd_offset + 16, central_offset + prefix_len)
+
+        cursor = central_offset
+        for _index in range(total_entries):
+            if cursor + 46 > len(data) or bytes(data[cursor : cursor + 4]) != ZIP_CENTRAL_DIRECTORY_SIGNATURE:
+                raise ValueError("ZIP wrapper central directory is invalid")
+            name_len, extra_len, comment_len = struct.unpack("<HHH", data[cursor + 28 : cursor + 34])
+            local_offset = struct.unpack("<L", data[cursor + 42 : cursor + 46])[0]
+            self._write_u32(data, cursor + 42, local_offset + prefix_len)
+            cursor += 46 + name_len + extra_len + comment_len
+        return bytes(data)
+
+    def _write_u32(self, data: bytearray, offset: int, value: int) -> None:
+        if not 0 <= value <= 0xFFFFFFFF:
+            raise ValueError("ZIP wrapper is too large for non-ZIP64 offsets")
+        data[offset : offset + 4] = struct.pack("<L", value)
+
+    def _write_directory_entries(
+        self,
+        archive: zipfile.ZipFile,
+        source_dir: str | Path,
+        written_names: set[str] | None = None,
+    ) -> None:
+        source_root = Path(source_dir).resolve()
+        if not source_root.exists() or not source_root.is_dir():
+            raise FileNotFoundError(f"Source directory does not exist: {source_root}")
+        for item in sorted(source_root.rglob("*")):
+            if item.is_symlink():
+                raise ValueError(f"Source directory contains an unsupported symlink: {item}")
+            if item.is_dir():
+                continue
+            if not item.is_file():
+                raise ValueError(f"Source directory contains an unsupported file type: {item}")
+            arcname = self._normalize_zip_entry_name(item.resolve().relative_to(source_root).as_posix())
+            if written_names is not None:
+                if arcname in written_names:
+                    raise ValueError("ZIP entry name duplicates a visible file")
+                written_names.add(arcname)
+            archive.write(item, arcname)
+
+    def _normalize_zip_entry_name(self, name: str) -> str:
+        normalized = name.replace("\\", "/").strip("/")
+        if not normalized or "\x00" in normalized or any(ord(char) < 32 for char in normalized):
+            raise ValueError("Unsafe ZIP entry name")
+        if normalized.startswith("../") or "/../" in normalized:
+            raise ValueError("Unsafe ZIP entry path")
+        if PureWindowsPath(normalized).drive or PureWindowsPath(normalized).is_absolute():
+            raise ValueError("Unsafe ZIP entry path")
+        path = PurePosixPath(normalized)
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("Unsafe ZIP entry path")
+        for part in path.parts:
+            self._validate_filename_part(part)
+        return path.as_posix()
 
     def _safe_extract_zip(self, zip_bytes: bytes, output_dir: Path, max_total_size: int) -> None:
         entries = self._validate_zip(zip_bytes, output_dir, max_total_size)

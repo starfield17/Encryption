@@ -33,10 +33,12 @@ from PySide6.QtWidgets import (
 from core.archiver import (
     DEFAULT_CONTAINER_SIZE_MB,
     DEFAULT_SLOT_COUNT,
+    DEFAULT_WRAPPER_ENTRY_NAME,
     NONCE_LEN,
     PAYLOAD_HEADER_LEN,
     SALT_LEN,
     TAG_LEN,
+    ZipWrapperOptions,
 )
 from core.config_store import load_app_config, load_preset, update_app_config
 from core.i18n import get_translator
@@ -45,7 +47,7 @@ from gui.window_geometry import clamped_window_size
 from gui.workers import AnalyzePayloadsWorker, CreateContainerWorker, ExtractWorker, PayloadEstimate, PayloadInput, WriteWorker
 
 
-CONTAINER_FILTER = "DARC containers (*.darc *.bin *.img);;All files (*)"
+CONTAINER_FILTER = "ZIP-compatible containers (*.zip);;DARC containers (*.darc *.bin *.img);;All files (*)"
 PAYLOAD_SLOT_COL = 0
 PAYLOAD_SOURCE_COL = 1
 PAYLOAD_ESTIMATE_COL = 2
@@ -113,7 +115,7 @@ class MainWindow(QMainWindow):
         preset = self._load_default_preset()
         self.default_container_size_mb = int(preset.get("container_size_mb", DEFAULT_CONTAINER_SIZE_MB))
         self.default_slot_count = int(preset.get("slot_count", DEFAULT_SLOT_COUNT))
-        self.default_extension = str(preset.get("default_extension", ".darc"))
+        self.default_extension = str(preset.get("default_extension", ".zip"))
 
         self._build_ui()
         self._connect_signals()
@@ -129,7 +131,7 @@ class MainWindow(QMainWindow):
             return {
                 "container_size_mb": DEFAULT_CONTAINER_SIZE_MB,
                 "slot_count": DEFAULT_SLOT_COUNT,
-                "default_extension": ".darc",
+                "default_extension": ".zip",
             }
 
     def _build_ui(self) -> None:
@@ -204,6 +206,39 @@ class MainWindow(QMainWindow):
         form.addWidget(self.create_compress_check, 3, 1)
         form.setColumnStretch(1, 1)
         layout.addWidget(self.create_box)
+
+        self.zip_wrapper_box = QGroupBox()
+        wrapper_form = QGridLayout(self.zip_wrapper_box)
+        self.zip_wrapper_check = QCheckBox()
+        self.zip_wrapper_check.setChecked(True)
+        self.zip_visible_source_label = QLabel()
+        self.zip_visible_source_edit = QLineEdit()
+        self.zip_visible_source_button = QPushButton()
+        self.zip_entry_source_label = QLabel()
+        self.zip_entry_source_edit = QLineEdit()
+        self.zip_entry_source_button = QPushButton()
+        self.zip_entry_name_label = QLabel()
+        self.zip_entry_name_edit = QLineEdit(DEFAULT_WRAPPER_ENTRY_NAME)
+        self.zip_entry_password_label = QLabel()
+        self.zip_entry_password_edit = QLineEdit()
+        self.zip_entry_password_edit.setEchoMode(QLineEdit.Password)
+        self.zip_entry_confirm_label = QLabel()
+        self.zip_entry_confirm_edit = QLineEdit()
+        self.zip_entry_confirm_edit.setEchoMode(QLineEdit.Password)
+        self.zip_entry_show_password_check = QCheckBox()
+
+        wrapper_form.addWidget(self.zip_wrapper_check, 0, 1)
+        self._add_path_row(wrapper_form, 1, self.zip_visible_source_label, self.zip_visible_source_edit, self.zip_visible_source_button)
+        self._add_path_row(wrapper_form, 2, self.zip_entry_source_label, self.zip_entry_source_edit, self.zip_entry_source_button)
+        wrapper_form.addWidget(self.zip_entry_name_label, 3, 0)
+        wrapper_form.addWidget(self.zip_entry_name_edit, 3, 1)
+        wrapper_form.addWidget(self.zip_entry_password_label, 4, 0)
+        wrapper_form.addWidget(self.zip_entry_password_edit, 4, 1)
+        wrapper_form.addWidget(self.zip_entry_confirm_label, 5, 0)
+        wrapper_form.addWidget(self.zip_entry_confirm_edit, 5, 1)
+        wrapper_form.addWidget(self.zip_entry_show_password_check, 6, 1)
+        wrapper_form.setColumnStretch(1, 1)
+        layout.addWidget(self.zip_wrapper_box)
 
         self.payload_box = QGroupBox()
         payload_layout = QVBoxLayout(self.payload_box)
@@ -405,6 +440,10 @@ class MainWindow(QMainWindow):
         self.about_button.clicked.connect(self._show_about)
         self.language_combo.currentIndexChanged.connect(self._language_changed)
         self.create_container_button.clicked.connect(self._browse_create_container)
+        self.zip_wrapper_check.stateChanged.connect(self._update_zip_wrapper_controls)
+        self.zip_visible_source_button.clicked.connect(lambda: self._browse_directory(self.zip_visible_source_edit))
+        self.zip_entry_source_button.clicked.connect(lambda: self._browse_directory(self.zip_entry_source_edit))
+        self.zip_entry_show_password_check.stateChanged.connect(self._update_zip_wrapper_controls)
         self.add_payload_button.clicked.connect(self._add_payload_from_button)
         self.remove_payload_button.clicked.connect(self._remove_selected_payload)
         self.analyze_payloads_button.clicked.connect(self._run_analyze_payloads)
@@ -445,6 +484,17 @@ class MainWindow(QMainWindow):
         self.create_slots_label.setText(self.tr.t("gui.label.slot_count"))
         self.create_compress_check.setText(self.tr.t("gui.label.compress_payload"))
         self.create_container_button.setText(self.tr.t("gui.button.browse_file"))
+        self.zip_wrapper_box.setTitle(self.tr.t("gui.group.visible_zip_contents"))
+        self.zip_wrapper_check.setText(self.tr.t("gui.label.zip_wrapper"))
+        self.zip_visible_source_label.setText(self.tr.t("gui.label.visible_source_dir"))
+        self.zip_entry_source_label.setText(self.tr.t("gui.label.passworded_entry_source_dir"))
+        self.zip_entry_name_label.setText(self.tr.t("gui.label.passworded_entry_name"))
+        self.zip_entry_password_label.setText(self.tr.t("gui.label.passworded_entry_password"))
+        self.zip_entry_confirm_label.setText(self.tr.t("gui.label.confirm_password"))
+        self.zip_entry_show_password_check.setText(self.tr.t("gui.label.show_password"))
+        self.zip_visible_source_button.setText(self.tr.t("gui.button.browse_dir"))
+        self.zip_entry_source_button.setText(self.tr.t("gui.button.browse_dir"))
+        self._update_zip_wrapper_controls()
         self.payload_box.setTitle(self.tr.t("gui.group.payload_slots"))
         self.add_payload_button.setText(self.tr.t("gui.button.add_folder"))
         self.remove_payload_button.setText(self.tr.t("gui.button.remove_payload"))
@@ -506,6 +556,9 @@ class MainWindow(QMainWindow):
 
         for edit, key in [
             (self.create_container_edit, "gui.placeholder.container_new"),
+            (self.zip_visible_source_edit, "gui.placeholder.visible_source_dir"),
+            (self.zip_entry_source_edit, "gui.placeholder.passworded_entry_source_dir"),
+            (self.zip_entry_name_edit, "gui.placeholder.passworded_entry_name"),
             (self.write_container_edit, "gui.placeholder.container_existing"),
             (self.write_source_edit, "gui.placeholder.source_dir"),
             (self.extract_container_edit, "gui.placeholder.container_existing"),
@@ -810,6 +863,28 @@ class MainWindow(QMainWindow):
         echo_mode = QLineEdit.Normal if self.extract_show_password_check.isChecked() else QLineEdit.Password
         self.extract_password_edit.setEchoMode(echo_mode)
 
+    def _update_zip_wrapper_controls(self, *_args) -> None:
+        enabled = self.zip_wrapper_check.isChecked()
+        echo_mode = QLineEdit.Normal if self.zip_entry_show_password_check.isChecked() else QLineEdit.Password
+        for widget in [
+            self.zip_visible_source_label,
+            self.zip_visible_source_edit,
+            self.zip_visible_source_button,
+            self.zip_entry_source_label,
+            self.zip_entry_source_edit,
+            self.zip_entry_source_button,
+            self.zip_entry_name_label,
+            self.zip_entry_name_edit,
+            self.zip_entry_password_label,
+            self.zip_entry_password_edit,
+            self.zip_entry_confirm_label,
+            self.zip_entry_confirm_edit,
+            self.zip_entry_show_password_check,
+        ]:
+            widget.setEnabled(enabled)
+        self.zip_entry_password_edit.setEchoMode(echo_mode)
+        self.zip_entry_confirm_edit.setEchoMode(echo_mode)
+
     def _password_looks_weak(self, password: str) -> bool:
         if not password:
             return False
@@ -1030,6 +1105,49 @@ class MainWindow(QMainWindow):
                 return None, self.tr.t("gui.message.payload_too_large_for_plan")
         return payloads, None
 
+    def _collect_zip_wrapper_options(self) -> tuple[ZipWrapperOptions | None, str | None]:
+        if not self.zip_wrapper_check.isChecked():
+            return None, None
+
+        visible_source = self._optional_directory(self.zip_visible_source_edit, "gui.message.visible_source_missing")
+        if isinstance(visible_source, str):
+            return None, visible_source
+
+        entry_source = self._optional_directory(self.zip_entry_source_edit, "gui.message.passworded_entry_source_missing")
+        if isinstance(entry_source, str):
+            return None, entry_source
+
+        entry_password = self.zip_entry_password_edit.text()
+        entry_confirm = self.zip_entry_confirm_edit.text()
+        if entry_source is not None:
+            if not entry_password:
+                return None, self.tr.t("gui.message.passworded_entry_password_required")
+            if entry_password != entry_confirm:
+                return None, self.tr.t("gui.message.password_mismatch")
+        elif entry_password or entry_confirm:
+            return None, self.tr.t("gui.message.passworded_entry_source_required")
+
+        entry_name = self.zip_entry_name_edit.text().strip() or DEFAULT_WRAPPER_ENTRY_NAME
+        return (
+            ZipWrapperOptions(
+                enabled=True,
+                visible_source_dir=visible_source,
+                encrypted_entry_source_dir=entry_source,
+                encrypted_entry_name=entry_name,
+                encrypted_entry_password=entry_password if entry_source is not None else None,
+            ),
+            None,
+        )
+
+    def _optional_directory(self, edit: QLineEdit, missing_message_key: str) -> Path | str | None:
+        raw = edit.text().strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        if not path.exists() or not path.is_dir():
+            return self.tr.t(missing_message_key)
+        return path
+
     def _has_duplicate_passwords(self, payloads: list[PayloadInput]) -> bool:
         seen: set[str] = set()
         for payload in payloads:
@@ -1037,6 +1155,11 @@ class MainWindow(QMainWindow):
                 return True
             seen.add(payload.password)
         return False
+
+    def _zip_entry_password_matches_payload(self, zip_wrapper: ZipWrapperOptions | None, payloads: list[PayloadInput]) -> bool:
+        if zip_wrapper is None or not zip_wrapper.encrypted_entry_password:
+            return False
+        return any(payload.password == zip_wrapper.encrypted_entry_password for payload in payloads)
 
     def _run_create(self) -> None:
         container = self._required_path(self.create_container_edit, "gui.message.select_container")
@@ -1048,11 +1171,25 @@ class MainWindow(QMainWindow):
             return
         if payloads is None:
             return
+        zip_wrapper, error = self._collect_zip_wrapper_options()
+        if error is not None:
+            self._show_warning(error)
+            return
         if self._has_duplicate_passwords(payloads):
             result = QMessageBox.question(
                 self,
                 self.tr.t("gui.message.warning"),
                 self.tr.t("gui.message.duplicate_passwords"),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if result != QMessageBox.Yes:
+                return
+        if self._zip_entry_password_matches_payload(zip_wrapper, payloads):
+            result = QMessageBox.question(
+                self,
+                self.tr.t("gui.message.warning"),
+                self.tr.t("gui.message.zip_entry_password_matches_payload"),
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
@@ -1073,6 +1210,7 @@ class MainWindow(QMainWindow):
             self.create_size_spin.value(),
             self.create_slots_spin.value(),
             payloads,
+            zip_wrapper,
             self.tr.t("gui.message.create_complete"),
         )
         self._start_worker(worker, self.tr.t("gui.status.creating"))

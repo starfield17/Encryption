@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import stat
 import zipfile
 from io import BytesIO
 
+import pyzipper
 import pytest
 
 import core.archiver as archiver_module
-from core.archiver import RAW_DUMP_MESSAGE, RAW_DUMP_SIZE, SUCCESS_MESSAGE, DeniableArchiver, UnsafeZipError
+from core.archiver import RAW_DUMP_MESSAGE, RAW_DUMP_SIZE, SUCCESS_MESSAGE, DeniableArchiver, UnsafeZipError, ZipWrapperOptions
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +70,79 @@ def test_roundtrip_without_compression_still_extracts_and_hides_plaintext(tmp_pa
     assert result.message == SUCCESS_MESSAGE
     assert result.raw_dumped is False
     assert (output / "stored.txt").read_text(encoding="utf-8") == "stored payload"
+
+
+def test_zip_wrapper_visible_layer_and_slots_roundtrip(tmp_path):
+    archiver = DeniableArchiver()
+    visible = tmp_path / "visible"
+    entry_source = tmp_path / "entry-source"
+    payload = tmp_path / "payload"
+    visible.mkdir()
+    entry_source.mkdir()
+    payload.mkdir()
+    (visible / "readme.txt").write_text("visible", encoding="utf-8")
+    (entry_source / "entry.txt").write_text("entry data", encoding="utf-8")
+    (payload / "secret.txt").write_text("payload data", encoding="utf-8")
+
+    vault = tmp_path / "vault.zip"
+    archiver.initialize_container(
+        vault,
+        size_mb=1,
+        slot_count=4,
+        zip_wrapper=ZipWrapperOptions(
+            enabled=True,
+            visible_source_dir=visible,
+            encrypted_entry_source_dir=entry_source,
+            encrypted_entry_name="archive.zip",
+            encrypted_entry_password="zip entry password",
+        ),
+    )
+
+    assert vault.stat().st_size > 1024 * 1024
+    assert archiver.zip_suffix_offset(vault) == 1024 * 1024
+    assert archiver.slot_region_size(vault) == 1024 * 1024
+    with zipfile.ZipFile(vault) as archive:
+        assert archive.namelist() == ["readme.txt", "archive.zip"]
+        assert archive.read("readme.txt") == b"visible"
+        info = archive.getinfo("archive.zip")
+        assert info.flag_bits & 0x1
+
+    with pyzipper.AESZipFile(vault) as archive:
+        archive.setpassword(b"zip entry password")
+        inner_zip = archive.read("archive.zip")
+    with zipfile.ZipFile(BytesIO(inner_zip)) as inner:
+        assert inner.read("entry.txt") == b"entry data"
+
+    archiver.write_payload(vault, payload, "payload password", 2, slot_count=4)
+    output = tmp_path / "output"
+    result = archiver.extract_payload(vault, "payload password", output, slot_count=4)
+
+    assert result.message == SUCCESS_MESSAGE
+    assert result.raw_dumped is False
+    assert (output / "secret.txt").read_text(encoding="utf-8") == "payload data"
+    with zipfile.ZipFile(vault) as archive:
+        assert archive.namelist() == ["readme.txt", "archive.zip"]
+
+
+def test_zip_wrapper_visible_only_passes_infozip_test(tmp_path):
+    archiver = DeniableArchiver()
+    visible = tmp_path / "visible"
+    visible.mkdir()
+    (visible / "readme.txt").write_text("visible", encoding="utf-8")
+
+    vault = tmp_path / "visible.zip"
+    archiver.initialize_container(
+        vault,
+        size_mb=1,
+        slot_count=4,
+        zip_wrapper=ZipWrapperOptions(enabled=True, visible_source_dir=visible),
+    )
+
+    result = subprocess.run(["zip", "-T", str(vault)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+
+    assert result.returncode == 0
+    assert "test of" in result.stdout
+    assert "OK" in result.stdout
 
 
 def test_wrong_password_produces_generic_raw_dump(tmp_path):
