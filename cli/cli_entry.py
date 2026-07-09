@@ -23,6 +23,7 @@ def _build_parser() -> argparse.ArgumentParser:
     write_parser.add_argument("source_dir", help="Source directory to archive")
     write_parser.add_argument("--slot", type=int, required=True, help="Slot index to overwrite")
     write_parser.add_argument("--slots", type=int, default=DEFAULT_SLOT_COUNT, help="Number of fixed-size slots")
+    write_parser.add_argument("--no-compress", action="store_true", help="Store files without ZIP compression")
 
     extract_parser = subparsers.add_parser("extract", help="Extract a matching payload or a blind raw dump")
     extract_parser.add_argument("container", help="Container path")
@@ -53,7 +54,14 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "write":
             password = _prompt_new_password()
-            archiver.write_payload(Path(args.container), Path(args.source_dir), password, args.slot, slot_count=args.slots)
+            archiver.write_payload(
+                Path(args.container),
+                Path(args.source_dir),
+                password,
+                args.slot,
+                slot_count=args.slots,
+                compress=not args.no_compress,
+            )
             print("Payload written.")
             return 0
         if args.command == "extract":
@@ -67,4 +75,3 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     parser.error("unknown command")
     return 2
-

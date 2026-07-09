@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -52,6 +53,43 @@ PAYLOAD_CAPACITY_COL = 3
 PAYLOAD_STATUS_COL = 4
 MIB = 1024 * 1024
 SLOT_OVERHEAD = SALT_LEN + NONCE_LEN + TAG_LEN + PAYLOAD_HEADER_LEN
+
+
+class PayloadTableWidget(QTableWidget):
+    def __init__(self, drop_handler, *args) -> None:
+        super().__init__(*args)
+        self._drop_handler = drop_handler
+        self.setAcceptDrops(True)
+        self.viewport().setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        if self._dropped_directories(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        directories = self._dropped_directories(event.mimeData())
+        if directories:
+            self._drop_handler(directories)
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def _dropped_directories(self, mime_data) -> list[Path]:
+        if not mime_data.hasUrls():
+            return []
+        directories: list[Path] = []
+        for url in mime_data.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.exists() and path.is_dir():
+                directories.append(path)
+        return directories
 
 
 class MainWindow(QMainWindow):
@@ -155,18 +193,21 @@ class MainWindow(QMainWindow):
         self.create_slots_spin = QSpinBox()
         self.create_slots_spin.setRange(2, 256)
         self.create_slots_spin.setValue(self.default_slot_count)
+        self.create_compress_check = QCheckBox()
+        self.create_compress_check.setChecked(True)
 
         self._add_path_row(form, 0, self.create_container_label, self.create_container_edit, self.create_container_button)
         form.addWidget(self.create_size_label, 1, 0)
         form.addWidget(self.create_size_spin, 1, 1)
         form.addWidget(self.create_slots_label, 2, 0)
         form.addWidget(self.create_slots_spin, 2, 1)
+        form.addWidget(self.create_compress_check, 3, 1)
         form.setColumnStretch(1, 1)
         layout.addWidget(self.create_box)
 
         self.payload_box = QGroupBox()
         payload_layout = QVBoxLayout(self.payload_box)
-        self.payload_table = QTableWidget(0, 5)
+        self.payload_table = PayloadTableWidget(self._add_payload_sources, 0, 5)
         self.payload_table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.payload_table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.payload_table.verticalHeader().setVisible(False)
@@ -201,10 +242,20 @@ class MainWindow(QMainWindow):
         self.detail_confirm_label = QLabel()
         self.detail_confirm_edit = QLineEdit()
         self.detail_confirm_edit.setEchoMode(QLineEdit.Password)
+        self.detail_show_password_check = QCheckBox()
+        self.detail_skip_confirm_check = QCheckBox()
+        self.detail_password_hint_label = QLabel()
+        self.detail_password_hint_label.setWordWrap(True)
         detail_layout.addWidget(self.detail_password_label, 0, 0)
         detail_layout.addWidget(self.detail_password_edit, 0, 1)
         detail_layout.addWidget(self.detail_confirm_label, 1, 0)
         detail_layout.addWidget(self.detail_confirm_edit, 1, 1)
+        detail_options = QHBoxLayout()
+        detail_options.addWidget(self.detail_show_password_check)
+        detail_options.addWidget(self.detail_skip_confirm_check)
+        detail_options.addStretch(1)
+        detail_layout.addLayout(detail_options, 2, 1)
+        detail_layout.addWidget(self.detail_password_hint_label, 3, 1)
         detail_layout.setColumnStretch(1, 1)
         layout.addWidget(self.payload_detail_box)
 
@@ -236,12 +287,18 @@ class MainWindow(QMainWindow):
         self.write_source_label = QLabel()
         self.write_source_edit = QLineEdit()
         self.write_source_button = QPushButton()
+        self.write_compress_check = QCheckBox()
+        self.write_compress_check.setChecked(True)
         self.write_password_label = QLabel()
         self.write_password_edit = QLineEdit()
         self.write_password_edit.setEchoMode(QLineEdit.Password)
         self.write_confirm_label = QLabel()
         self.write_confirm_edit = QLineEdit()
         self.write_confirm_edit.setEchoMode(QLineEdit.Password)
+        self.write_show_password_check = QCheckBox()
+        self.write_skip_confirm_check = QCheckBox()
+        self.write_password_hint_label = QLabel()
+        self.write_password_hint_label.setWordWrap(True)
         self.write_run_button = QPushButton()
 
         self._add_path_row(form, 0, self.write_container_label, self.write_container_edit, self.write_container_button)
@@ -250,11 +307,18 @@ class MainWindow(QMainWindow):
         form.addWidget(self.write_slot_label, 2, 0)
         form.addWidget(self.write_slot_index_spin, 2, 1)
         self._add_path_row(form, 3, self.write_source_label, self.write_source_edit, self.write_source_button)
-        form.addWidget(self.write_password_label, 4, 0)
-        form.addWidget(self.write_password_edit, 4, 1)
-        form.addWidget(self.write_confirm_label, 5, 0)
-        form.addWidget(self.write_confirm_edit, 5, 1)
-        form.addWidget(self.write_run_button, 6, 1)
+        form.addWidget(self.write_compress_check, 4, 1)
+        form.addWidget(self.write_password_label, 5, 0)
+        form.addWidget(self.write_password_edit, 5, 1)
+        form.addWidget(self.write_confirm_label, 6, 0)
+        form.addWidget(self.write_confirm_edit, 6, 1)
+        write_options = QHBoxLayout()
+        write_options.addWidget(self.write_show_password_check)
+        write_options.addWidget(self.write_skip_confirm_check)
+        write_options.addStretch(1)
+        form.addLayout(write_options, 7, 1)
+        form.addWidget(self.write_password_hint_label, 8, 1)
+        form.addWidget(self.write_run_button, 9, 1)
         form.setColumnStretch(1, 1)
         layout.addWidget(self.write_box)
         layout.addStretch(1)
@@ -277,6 +341,8 @@ class MainWindow(QMainWindow):
         self.extract_password_label = QLabel()
         self.extract_password_edit = QLineEdit()
         self.extract_password_edit.setEchoMode(QLineEdit.Password)
+        self.extract_show_password_check = QCheckBox()
+        self.extract_try_common_slots_check = QCheckBox()
         self.extract_run_button = QPushButton()
 
         self._add_path_row(form, 0, self.extract_container_label, self.extract_container_edit, self.extract_container_button)
@@ -285,7 +351,9 @@ class MainWindow(QMainWindow):
         form.addWidget(self.extract_slots_spin, 2, 1)
         form.addWidget(self.extract_password_label, 3, 0)
         form.addWidget(self.extract_password_edit, 3, 1)
-        form.addWidget(self.extract_run_button, 4, 1)
+        form.addWidget(self.extract_show_password_check, 4, 1)
+        form.addWidget(self.extract_try_common_slots_check, 5, 1)
+        form.addWidget(self.extract_run_button, 6, 1)
         form.setColumnStretch(1, 1)
         layout.addWidget(self.extract_box)
         layout.addStretch(1)
@@ -345,13 +413,20 @@ class MainWindow(QMainWindow):
         self.create_slots_spin.valueChanged.connect(self._sync_slot_index_limits)
         self.create_slots_spin.valueChanged.connect(self._refresh_payload_planning)
         self.create_size_spin.valueChanged.connect(self._refresh_payload_planning)
+        self.create_compress_check.stateChanged.connect(self._payload_sources_changed)
         self.payload_table.itemSelectionChanged.connect(self._payload_selection_changed)
         self.detail_password_edit.textChanged.connect(self._detail_password_changed)
         self.detail_confirm_edit.textChanged.connect(self._detail_confirm_changed)
+        self.detail_show_password_check.stateChanged.connect(self._update_create_password_controls)
+        self.detail_skip_confirm_check.stateChanged.connect(self._update_create_password_controls)
         self.create_run_button.clicked.connect(self._run_create)
         self.write_container_button.clicked.connect(lambda: self._browse_open_file(self.write_container_edit))
         self.write_source_button.clicked.connect(lambda: self._browse_directory(self.write_source_edit))
         self.write_slots_spin.valueChanged.connect(self._sync_slot_index_limits)
+        self.write_password_edit.textChanged.connect(self._update_write_password_controls)
+        self.write_show_password_check.stateChanged.connect(self._update_write_password_controls)
+        self.write_skip_confirm_check.stateChanged.connect(self._update_write_password_controls)
+        self.extract_show_password_check.stateChanged.connect(self._update_extract_password_controls)
         self.write_run_button.clicked.connect(self._run_write)
         self.extract_container_button.clicked.connect(lambda: self._browse_open_file(self.extract_container_edit))
         self.extract_output_button.clicked.connect(lambda: self._browse_directory(self.extract_output_edit))
@@ -368,9 +443,10 @@ class MainWindow(QMainWindow):
         self.create_container_label.setText(self.tr.t("gui.label.container"))
         self.create_size_label.setText(self.tr.t("gui.label.size_mb"))
         self.create_slots_label.setText(self.tr.t("gui.label.slot_count"))
+        self.create_compress_check.setText(self.tr.t("gui.label.compress_payload"))
         self.create_container_button.setText(self.tr.t("gui.button.browse_file"))
         self.payload_box.setTitle(self.tr.t("gui.group.payload_slots"))
-        self.add_payload_button.setText(self.tr.t("gui.button.add_payload"))
+        self.add_payload_button.setText(self.tr.t("gui.button.add_folder"))
         self.remove_payload_button.setText(self.tr.t("gui.button.remove_payload"))
         self.analyze_payloads_button.setText(self.tr.t("gui.button.analyze_payloads"))
         self.auto_plan_button.setText(self.tr.t("gui.button.auto_plan"))
@@ -381,7 +457,7 @@ class MainWindow(QMainWindow):
             [
                 self.tr.t("gui.table.slot"),
                 self.tr.t("gui.table.source_dir"),
-                self.tr.t("gui.table.estimated_zip"),
+                self.tr.t("gui.table.estimated_archive"),
                 self.tr.t("gui.table.slot_capacity"),
                 self.tr.t("gui.table.status"),
             ]
@@ -389,28 +465,38 @@ class MainWindow(QMainWindow):
         self.payload_detail_box.setTitle(self.tr.t("gui.group.selected_payload"))
         self.detail_password_label.setText(self.tr.t("gui.label.password"))
         self.detail_confirm_label.setText(self.tr.t("gui.label.confirm_password"))
+        self.detail_show_password_check.setText(self.tr.t("gui.label.show_password"))
+        self.detail_skip_confirm_check.setText(self.tr.t("gui.label.skip_confirmation"))
         self._sync_payload_row_translations()
         self._refresh_payload_planning()
+        self._update_create_password_controls()
 
         self.write_box.setTitle(self.tr.t("gui.group.write_slot"))
         self.write_container_label.setText(self.tr.t("gui.label.container"))
         self.write_source_label.setText(self.tr.t("gui.label.source_dir"))
         self.write_slots_label.setText(self.tr.t("gui.label.slot_count"))
         self.write_slot_label.setText(self.tr.t("gui.label.slot_index"))
+        self.write_compress_check.setText(self.tr.t("gui.label.compress_payload"))
         self.write_password_label.setText(self.tr.t("gui.label.password"))
         self.write_confirm_label.setText(self.tr.t("gui.label.confirm_password"))
+        self.write_show_password_check.setText(self.tr.t("gui.label.show_password"))
+        self.write_skip_confirm_check.setText(self.tr.t("gui.label.skip_confirmation"))
         self.write_container_button.setText(self.tr.t("gui.button.browse_file"))
         self.write_source_button.setText(self.tr.t("gui.button.browse_dir"))
         self.write_run_button.setText(self.tr.t("gui.button.write_slot"))
+        self._update_write_password_controls()
 
         self.extract_box.setTitle(self.tr.t("gui.group.extract"))
         self.extract_container_label.setText(self.tr.t("gui.label.container"))
         self.extract_output_label.setText(self.tr.t("gui.label.output_dir"))
         self.extract_slots_label.setText(self.tr.t("gui.label.slot_count_created"))
         self.extract_password_label.setText(self.tr.t("gui.label.password"))
+        self.extract_show_password_check.setText(self.tr.t("gui.label.show_password"))
+        self.extract_try_common_slots_check.setText(self.tr.t("gui.label.try_common_slot_counts"))
         self.extract_container_button.setText(self.tr.t("gui.button.browse_file"))
         self.extract_output_button.setText(self.tr.t("gui.button.browse_dir"))
         self.extract_run_button.setText(self.tr.t("gui.button.extract"))
+        self._update_extract_password_controls()
 
         self.settings_box.setTitle(self.tr.t("gui.group.settings"))
         self.language_label.setText(self.tr.t("gui.label.language"))
@@ -475,11 +561,57 @@ class MainWindow(QMainWindow):
             edit.setText(path)
 
     def _add_payload_from_button(self) -> None:
-        slot_index = self._next_unused_slot()
-        if slot_index is None:
-            self._show_warning(self.tr.t("gui.message.no_unused_slots"))
+        paths = self._browse_add_payload_folders()
+        if not paths:
             return
-        self._add_payload_row(slot_index)
+        added = self._add_payload_sources(paths)
+        if added == 0:
+            self._show_warning(self.tr.t("gui.message.no_usable_folders"))
+
+    def _browse_add_payload_folders(self) -> list[Path]:
+        dialog = QFileDialog(self, self.tr.t("gui.dialog.select_dirs"), str(self.repo_root))
+        dialog.setFileMode(QFileDialog.Directory)
+        dialog.setOption(QFileDialog.ShowDirsOnly, True)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        for view in dialog.findChildren(QAbstractItemView):
+            view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        if not dialog.exec():
+            return []
+        return [Path(path) for path in dialog.selectedFiles()]
+
+    def _add_payload_sources(self, paths: list[Path]) -> int:
+        added = 0
+        for path in paths:
+            if not path.exists() or not path.is_dir():
+                continue
+            row = self._first_empty_payload_row()
+            if row is None:
+                slot_index = self._next_unused_slot()
+                if slot_index is None:
+                    self._show_warning(self.tr.t("gui.message.no_unused_slots"))
+                    break
+                self._add_payload_row(slot_index, str(path))
+                added += 1
+                continue
+            self._payload_source_edit(row).setText(str(path))
+            self._payload_estimates[row] = None
+            self._payload_estimate_errors[row] = None
+            self.payload_table.selectRow(row)
+            self._load_payload_detail(row)
+            added += 1
+        self._refresh_payload_planning()
+        return added
+
+    def _first_empty_payload_row(self) -> int | None:
+        for row in range(self.payload_table.rowCount()):
+            if self._payload_source_edit(row).text().strip():
+                continue
+            if row < len(self._payload_passwords) and self._payload_passwords[row]:
+                continue
+            if row < len(self._payload_confirms) and self._payload_confirms[row]:
+                continue
+            return row
+        return None
 
     def _add_payload_row(self, slot_index: int | None = None, source_dir: str = "", password: str = "", confirm: str = "") -> None:
         row = self.payload_table.rowCount()
@@ -622,18 +754,70 @@ class MainWindow(QMainWindow):
             self.detail_password_edit.setText(self._payload_passwords[row])
             self.detail_confirm_edit.setText(self._payload_confirms[row])
         self._payload_detail_guard = False
+        self._update_create_password_controls()
 
     def _detail_password_changed(self, text: str) -> None:
         if self._payload_detail_guard or self._payload_detail_row is None:
             return
         if self._payload_detail_row < len(self._payload_passwords):
             self._payload_passwords[self._payload_detail_row] = text
+            if self.detail_skip_confirm_check.isChecked():
+                self._payload_confirms[self._payload_detail_row] = text
+                self.detail_confirm_edit.setText(text)
+        self._update_create_password_controls()
 
     def _detail_confirm_changed(self, text: str) -> None:
         if self._payload_detail_guard or self._payload_detail_row is None:
             return
         if self._payload_detail_row < len(self._payload_confirms):
             self._payload_confirms[self._payload_detail_row] = text
+
+    def _update_create_password_controls(self, *_args) -> None:
+        echo_mode = QLineEdit.Normal if self.detail_show_password_check.isChecked() else QLineEdit.Password
+        self.detail_password_edit.setEchoMode(echo_mode)
+        self.detail_confirm_edit.setEchoMode(echo_mode)
+        has_row = self._payload_detail_row is not None and self._payload_detail_row < len(self._payload_passwords)
+        confirm_enabled = has_row and not self.detail_skip_confirm_check.isChecked()
+        self.detail_password_edit.setEnabled(has_row)
+        self.detail_confirm_edit.setEnabled(confirm_enabled)
+        self.detail_confirm_label.setEnabled(confirm_enabled)
+        if has_row and self.detail_skip_confirm_check.isChecked():
+            password = self.detail_password_edit.text()
+            self._payload_confirms[self._payload_detail_row] = password
+            if self.detail_confirm_edit.text() != password:
+                self.detail_confirm_edit.setText(password)
+        password = self.detail_password_edit.text() if has_row else ""
+        self.detail_password_hint_label.setText(
+            self.tr.t("gui.message.weak_password_hint") if self._password_looks_weak(password) else ""
+        )
+
+    def _update_write_password_controls(self, *_args) -> None:
+        echo_mode = QLineEdit.Normal if self.write_show_password_check.isChecked() else QLineEdit.Password
+        self.write_password_edit.setEchoMode(echo_mode)
+        self.write_confirm_edit.setEchoMode(echo_mode)
+        confirm_enabled = not self.write_skip_confirm_check.isChecked()
+        self.write_confirm_edit.setEnabled(confirm_enabled)
+        self.write_confirm_label.setEnabled(confirm_enabled)
+        if self.write_skip_confirm_check.isChecked():
+            self.write_confirm_edit.setText(self.write_password_edit.text())
+        self.write_password_hint_label.setText(
+            self.tr.t("gui.message.weak_password_hint")
+            if self._password_looks_weak(self.write_password_edit.text())
+            else ""
+        )
+
+    def _update_extract_password_controls(self, *_args) -> None:
+        echo_mode = QLineEdit.Normal if self.extract_show_password_check.isChecked() else QLineEdit.Password
+        self.extract_password_edit.setEchoMode(echo_mode)
+
+    def _password_looks_weak(self, password: str) -> bool:
+        if not password:
+            return False
+        if len(password) >= 20:
+            return False
+        if len([part for part in password.split() if part]) >= 6:
+            return False
+        return True
 
     def _payload_sources_changed(self) -> None:
         for row in range(self.payload_table.rowCount()):
@@ -708,7 +892,7 @@ class MainWindow(QMainWindow):
         if sources is None:
             self._auto_plan_after_analysis = False
             return
-        worker = AnalyzePayloadsWorker(sources)
+        worker = AnalyzePayloadsWorker(sources, compress=self.create_compress_check.isChecked())
         self._start_worker(worker, self.tr.t("gui.status.analyzing"), completed_handler=self._analysis_completed)
 
     def _analysis_completed(self, estimates: list[PayloadEstimate]) -> None:
@@ -825,9 +1009,16 @@ class MainWindow(QMainWindow):
                 return None, self.tr.t("gui.message.source_missing")
 
             password = self._payload_passwords[row]
-            if password != self._payload_confirms[row]:
+            if not self.detail_skip_confirm_check.isChecked() and password != self._payload_confirms[row]:
                 return None, self.tr.t("gui.message.password_mismatch")
-            payloads.append(PayloadInput(slot_index=slot_index, source_dir=source_dir, password=password))
+            payloads.append(
+                PayloadInput(
+                    slot_index=slot_index,
+                    source_dir=source_dir,
+                    password=password,
+                    compress=self.create_compress_check.isChecked(),
+                )
+            )
 
         for row in range(self.payload_table.rowCount()):
             if self._payload_estimate_errors[row]:
@@ -892,7 +1083,7 @@ class MainWindow(QMainWindow):
         if container is None or source is None:
             return
         password = self.write_password_edit.text()
-        if password != self.write_confirm_edit.text():
+        if not self.write_skip_confirm_check.isChecked() and password != self.write_confirm_edit.text():
             self._show_warning(self.tr.t("gui.message.password_mismatch"))
             return
         worker = WriteWorker(
@@ -901,6 +1092,7 @@ class MainWindow(QMainWindow):
             password,
             self.write_slot_index_spin.value(),
             self.write_slots_spin.value(),
+            self.write_compress_check.isChecked(),
             self.tr.t("gui.message.write_complete"),
         )
         self._start_worker(worker, self.tr.t("gui.status.writing"))
@@ -915,6 +1107,7 @@ class MainWindow(QMainWindow):
             self.extract_password_edit.text(),
             output,
             self.extract_slots_spin.value(),
+            self.extract_try_common_slots_check.isChecked(),
         )
         self._start_worker(worker, self.tr.t("gui.status.extracting"))
 

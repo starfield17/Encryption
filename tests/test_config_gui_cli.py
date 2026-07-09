@@ -10,7 +10,7 @@ import pytest
 import core.archiver as archiver_module
 from cli.cli_entry import run_cli
 from core.app_paths import ensure_runtime_layout, source_root
-from core.config_store import load_app_config, load_preset
+from core.config_store import load_app_config, load_preset, save_app_config
 from core.i18n import get_translator
 
 
@@ -40,6 +40,25 @@ def test_app_config_has_defaults():
 
     assert config["language"] == "en"
     assert config["default_preset_name"] == "default_standard"
+    assert config["remember_recent_paths"] is False
+    assert "recent_paths" not in config
+
+
+def test_app_config_drops_legacy_recent_paths():
+    config_dir, _workdir = ensure_runtime_layout()
+
+    save_app_config(
+        config_dir,
+        {
+            "language": "en",
+            "default_preset_name": "default_standard",
+            "recent_paths": ["/tmp/example.darc"],
+        },
+    )
+    config = load_app_config(config_dir)
+
+    assert config["remember_recent_paths"] is False
+    assert "recent_paths" not in config
 
 
 def test_cli_init_smoke(tmp_path):
@@ -47,6 +66,21 @@ def test_cli_init_smoke(tmp_path):
 
     assert run_cli(["init", str(vault), "--size-mb", "1", "--slots", "4"]) == 0
     assert vault.stat().st_size == 1024 * 1024
+
+
+def test_cli_write_no_compress_roundtrip(monkeypatch, tmp_path):
+    vault = tmp_path / "cli-no-compress.darc"
+    source = tmp_path / "source"
+    output = tmp_path / "output"
+    source.mkdir()
+    (source / "file.txt").write_text("payload", encoding="utf-8")
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "long unique passphrase")
+
+    assert run_cli(["init", str(vault), "--size-mb", "1", "--slots", "4"]) == 0
+    assert run_cli(["write", str(vault), str(source), "--slot", "0", "--slots", "4", "--no-compress"]) == 0
+    assert run_cli(["extract", str(vault), str(output), "--slots", "4"]) == 0
+
+    assert (output / "file.txt").read_text(encoding="utf-8") == "payload"
 
 
 def test_darc_cli_help_smoke():
@@ -80,6 +114,12 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
         assert window.payload_table.rowCount() == 1
         assert window.payload_table.columnCount() == 5
         assert window.payload_detail_box.title() == "Selected payload"
+        assert window.add_payload_button.text() == "Add Folder"
+        assert window.create_compress_check.isChecked()
+        assert window.write_compress_check.isChecked()
+        assert not window.detail_show_password_check.isChecked()
+        assert not window.detail_skip_confirm_check.isChecked()
+        assert not window.extract_try_common_slots_check.isChecked()
         assert window.extract_slots_label.text() == "Slot count used when created"
         assert not hasattr(window, "runtime_box")
         assert window.tabs.widget(3) is window.settings_tab
@@ -127,6 +167,89 @@ def test_gui_create_validation_helpers(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_gui_adds_multiple_payload_folders_and_filters_drop_urls(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtCore import QMimeData, QUrl
+    from PySide6.QtWidgets import QApplication
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source_a = tmp_path / "a"
+    source_b = tmp_path / "b"
+    ignored_file = tmp_path / "file.txt"
+    source_a.mkdir()
+    source_b.mkdir()
+    ignored_file.write_text("not a directory", encoding="utf-8")
+    try:
+        added = window._add_payload_sources([source_a, ignored_file, source_b])
+
+        assert added == 2
+        assert window.payload_table.rowCount() == 2
+        assert window._payload_source_edit(0).text() == str(source_a)
+        assert window._payload_source_edit(1).text() == str(source_b)
+        slots = [window._payload_slot_spin(row).value() for row in range(window.payload_table.rowCount())]
+        assert len(slots) == len(set(slots))
+
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(str(source_a)), QUrl.fromLocalFile(str(ignored_file))])
+
+        assert window.payload_table._dropped_directories(mime) == [source_a]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_gui_password_visibility_hint_and_skip_confirm(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QLineEdit
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.txt").write_text("payload", encoding="utf-8")
+    try:
+        window._payload_source_edit(0).setText(str(source))
+        window._payload_estimates[0] = 1
+        window.detail_password_edit.setText("short")
+        window.detail_confirm_edit.setText("different")
+
+        assert window.tr.t("gui.message.weak_password_hint") in window.detail_password_hint_label.text()
+        payloads, error = window._collect_create_payloads()
+        assert payloads is None
+        assert error == window.tr.t("gui.message.password_mismatch")
+
+        window.detail_show_password_check.setChecked(True)
+        assert window.detail_password_edit.echoMode() == QLineEdit.Normal
+        window.detail_skip_confirm_check.setChecked(True)
+        assert not window.detail_confirm_edit.isEnabled()
+
+        payloads, error = window._collect_create_payloads()
+        assert error is None
+        assert payloads is not None
+        assert payloads[0].password == "short"
+
+        window.create_compress_check.setChecked(False)
+        assert window._payload_estimates[0] is None
+
+        window.write_password_edit.setText("short")
+        assert window.tr.t("gui.message.weak_password_hint") in window.write_password_hint_label.text()
+        window.write_show_password_check.setChecked(True)
+        assert window.write_password_edit.echoMode() == QLineEdit.Normal
+        window.write_skip_confirm_check.setChecked(True)
+        assert not window.write_confirm_edit.isEnabled()
+
+        window.extract_show_password_check.setChecked(True)
+        assert window.extract_password_edit.echoMode() == QLineEdit.Normal
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_gui_analyze_and_auto_plan_helpers(monkeypatch, tmp_path):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QMessageBox
@@ -164,18 +287,25 @@ def test_analyze_payloads_worker_estimates_zip_size(tmp_path):
     app = QApplication.instance() or QApplication([])
     source = tmp_path / "source"
     source.mkdir()
-    (source / "file.txt").write_text("hello", encoding="utf-8")
-    results = []
+    (source / "file.txt").write_text("hello" * 1000, encoding="utf-8")
+    compressed_results = []
+    stored_results = []
 
     worker = AnalyzePayloadsWorker([(0, source)])
-    worker.completed.connect(results.append)
+    worker.completed.connect(compressed_results.append)
     worker.run()
+    stored_worker = AnalyzePayloadsWorker([(0, source)], compress=False)
+    stored_worker.completed.connect(stored_results.append)
+    stored_worker.run()
     app.processEvents()
 
-    assert len(results) == 1
-    assert results[0][0].row_index == 0
-    assert results[0][0].zip_size is not None
-    assert results[0][0].zip_size > 0
+    assert len(compressed_results) == 1
+    assert len(stored_results) == 1
+    assert compressed_results[0][0].row_index == 0
+    assert compressed_results[0][0].zip_size is not None
+    assert stored_results[0][0].zip_size is not None
+    assert compressed_results[0][0].zip_size > 0
+    assert stored_results[0][0].zip_size > compressed_results[0][0].zip_size
 
 
 def test_create_container_worker_writes_multiple_payloads(tmp_path):
@@ -215,6 +345,44 @@ def test_create_container_worker_writes_multiple_payloads(tmp_path):
     assert (output_a / "a.txt").read_text(encoding="utf-8") == "alpha"
     assert (output_b / "b.txt").read_text(encoding="utf-8") == "beta"
     assert (output_raw / "decrypted_raw.bin").exists()
+
+
+def test_extract_worker_try_common_slot_counts_stays_blind(tmp_path):
+    from PySide6.QtWidgets import QApplication
+
+    from gui.workers import ExtractWorker
+
+    app = QApplication.instance() or QApplication([])
+    archiver = archiver_module.DeniableArchiver()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.txt").write_text("payload", encoding="utf-8")
+    vault = tmp_path / "vault.darc"
+    archiver.initialize_container(vault, size_mb=1, slot_count=4)
+    archiver.write_payload(vault, source, "long unique passphrase", 2, slot_count=4)
+
+    output = tmp_path / "output"
+    completed = []
+    worker = ExtractWorker(vault, "long unique passphrase", output, slot_count=2, try_common_slot_counts=True)
+    worker.completed.connect(completed.append)
+    worker.run()
+    app.processEvents()
+
+    assert completed == [archiver_module.SUCCESS_MESSAGE]
+    assert (output / "file.txt").read_text(encoding="utf-8") == "payload"
+    assert not (output / "decrypted_raw.bin").exists()
+    assert not list(tmp_path.glob(".output.*.extract"))
+
+    raw_output = tmp_path / "raw-output"
+    raw_completed = []
+    raw_worker = ExtractWorker(vault, "unrelated passphrase", raw_output, slot_count=2, try_common_slot_counts=True)
+    raw_worker.completed.connect(raw_completed.append)
+    raw_worker.run()
+    app.processEvents()
+
+    assert raw_completed == [archiver_module.RAW_DUMP_MESSAGE]
+    assert (raw_output / "decrypted_raw.bin").exists()
+    assert not list(tmp_path.glob(".raw-output.*.extract"))
 
 
 def test_create_container_worker_failure_preserves_existing_container(tmp_path):

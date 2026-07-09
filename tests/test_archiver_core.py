@@ -48,6 +48,28 @@ def test_roundtrip_keeps_container_shape_and_hides_plaintext(tmp_path):
     assert (output / "nested" / "data.bin").read_bytes() == b"\x00\x01\x02"
 
 
+def test_roundtrip_without_compression_still_extracts_and_hides_plaintext(tmp_path):
+    archiver = DeniableArchiver()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "stored.txt").write_text("stored payload", encoding="utf-8")
+
+    vault = tmp_path / "stored.darc"
+    archiver.initialize_container(vault, size_mb=1, slot_count=4)
+    archiver.write_payload(vault, source, "long unique passphrase", 1, slot_count=4, compress=False)
+
+    container_bytes = vault.read_bytes()
+    assert b"stored.txt" not in container_bytes
+    assert b"stored payload" not in container_bytes
+
+    output = tmp_path / "output"
+    result = archiver.extract_payload(vault, "long unique passphrase", output, slot_count=4)
+
+    assert result.message == SUCCESS_MESSAGE
+    assert result.raw_dumped is False
+    assert (output / "stored.txt").read_text(encoding="utf-8") == "stored payload"
+
+
 def test_wrong_password_produces_generic_raw_dump(tmp_path):
     archiver = DeniableArchiver()
     source = tmp_path / "source"

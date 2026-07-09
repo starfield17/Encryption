@@ -36,8 +36,15 @@ def _default_app_config() -> dict[str, Any]:
     return {
         "language": "en",
         "default_preset_name": "default_standard",
-        "recent_paths": [],
+        "remember_recent_paths": False,
     }
+
+
+def _normalize_app_config(data: dict[str, Any]) -> dict[str, Any]:
+    normalized = {**_default_app_config(), **data}
+    normalized.pop("recent_paths", None)
+    normalized["remember_recent_paths"] = bool(normalized.get("remember_recent_paths", False))
+    return normalized
 
 
 def list_presets(config_dir: Path) -> list[str]:
@@ -59,12 +66,13 @@ def _load_app_config_unlocked(config_dir: Path) -> dict[str, Any]:
     if path.exists():
         data = json.loads(path.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            return {**_default_app_config(), **data}
+            return _normalize_app_config(data)
     return _default_app_config()
 
 
 def _save_app_config_unlocked(config_dir: Path, data: dict[str, Any]) -> Path:
     path = app_config_path(config_dir)
+    data = _normalize_app_config(data)
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return path
 

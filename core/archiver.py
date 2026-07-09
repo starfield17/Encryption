@@ -79,6 +79,7 @@ class DeniableArchiver:
         password: str,
         slot_index: int,
         slot_count: int = DEFAULT_SLOT_COUNT,
+        compress: bool = True,
     ) -> None:
         container = Path(container_path)
         source = Path(source_dir)
@@ -92,7 +93,7 @@ class DeniableArchiver:
         if not 0 <= slot_index < slot_count:
             raise ValueError("slot_index out of range")
 
-        zip_bytes = self._zip_directory(source)
+        zip_bytes = self._zip_directory(source, compress=compress)
         blob_len = self._slot_plaintext_len(slot_size)
         payload_blob = self._build_payload_blob(zip_bytes, blob_len)
 
@@ -201,10 +202,11 @@ class DeniableArchiver:
             return None
         return zip_bytes
 
-    def _zip_directory(self, source_dir: Path) -> bytes:
+    def _zip_directory(self, source_dir: Path, compress: bool = True) -> bytes:
         source_root = source_dir.resolve()
         buffer = io.BytesIO()
-        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        compression = zipfile.ZIP_DEFLATED if compress else zipfile.ZIP_STORED
+        with zipfile.ZipFile(buffer, "w", compression=compression) as archive:
             for item in sorted(source_root.rglob("*")):
                 if item.is_symlink():
                     raise ValueError(f"Source directory contains an unsupported symlink: {item}")
