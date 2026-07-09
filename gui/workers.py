@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
 from core.archiver import DeniableArchiver
+
+
+@dataclass(frozen=True)
+class PayloadInput:
+    slot_index: int
+    source_dir: Path
+    password: str
 
 
 class InitWorker(QThread):
@@ -21,6 +29,42 @@ class InitWorker(QThread):
     def run(self) -> None:
         try:
             DeniableArchiver().initialize_container(self.container_path, self.size_mb, self.slot_count)
+            self.completed.emit(self.success_message)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class CreateContainerWorker(QThread):
+    completed = Signal(str)
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        container_path: Path,
+        size_mb: int,
+        slot_count: int,
+        payloads: list[PayloadInput],
+        success_message: str,
+    ) -> None:
+        super().__init__()
+        self.container_path = container_path
+        self.size_mb = size_mb
+        self.slot_count = slot_count
+        self.payloads = payloads
+        self.success_message = success_message
+
+    def run(self) -> None:
+        try:
+            archiver = DeniableArchiver()
+            archiver.initialize_container(self.container_path, self.size_mb, self.slot_count)
+            for payload in self.payloads:
+                archiver.write_payload(
+                    self.container_path,
+                    payload.source_dir,
+                    payload.password,
+                    payload.slot_index,
+                    slot_count=self.slot_count,
+                )
             self.completed.emit(self.success_message)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -83,4 +127,3 @@ class ExtractWorker(QThread):
             self.completed.emit(result.message)
         except Exception as exc:
             self.failed.emit(str(exc))
-

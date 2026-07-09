@@ -73,10 +73,93 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
     window = MainWindow(repo_root=source_root())
     try:
         assert window.windowTitle()
-        assert window.tabs.count() == 3
+        assert window.tabs.count() == 4
+        assert window.tabs.currentIndex() == 0
+        assert window.tabs.tabText(0) == "Create"
+        assert window.tabs.tabText(1) == "Write Slot"
+        assert window.payload_table.rowCount() == 1
+        assert not hasattr(window, "runtime_box")
+        assert window.tabs.widget(3) is window.settings_tab
     finally:
         window.close()
         app.processEvents()
+
+
+def test_gui_create_validation_helpers(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source_a = tmp_path / "a"
+    source_b = tmp_path / "b"
+    source_a.mkdir()
+    source_b.mkdir()
+    try:
+        window.payload_table.removeRow(0)
+        payloads, error = window._collect_create_payloads()
+        assert payloads is None
+        assert error == window.tr.t("gui.message.no_payloads")
+
+        window._add_payload_row(0, str(source_a), "alpha", "alpha")
+        window._add_payload_row(0, str(source_b), "beta", "beta")
+        payloads, error = window._collect_create_payloads()
+        assert payloads is None
+        assert error == window.tr.t("gui.message.duplicate_slots")
+
+        window.payload_table.clearSelection()
+        window._auto_assign_slots()
+        slots = [window._payload_slot_spin(row).value() for row in range(window.payload_table.rowCount())]
+        assert slots == [0, 1]
+
+        window._payload_confirm_edit(1).setText("different")
+        payloads, error = window._collect_create_payloads()
+        assert payloads is None
+        assert error == window.tr.t("gui.message.password_mismatch")
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_create_container_worker_writes_multiple_payloads(tmp_path):
+    from gui.workers import CreateContainerWorker, PayloadInput
+
+    source_a = tmp_path / "source-a"
+    source_b = tmp_path / "source-b"
+    source_a.mkdir()
+    source_b.mkdir()
+    (source_a / "a.txt").write_text("alpha", encoding="utf-8")
+    (source_b / "b.txt").write_text("beta", encoding="utf-8")
+
+    vault = tmp_path / "multi.darc"
+    worker = CreateContainerWorker(
+        vault,
+        1,
+        4,
+        [
+            PayloadInput(slot_index=0, source_dir=source_a, password="alpha password"),
+            PayloadInput(slot_index=2, source_dir=source_b, password="beta password"),
+        ],
+        "done",
+    )
+    worker.run()
+
+    archiver = archiver_module.DeniableArchiver()
+    output_a = tmp_path / "out-a"
+    output_b = tmp_path / "out-b"
+    output_raw = tmp_path / "out-raw"
+    result_a = archiver.extract_payload(vault, "alpha password", output_a, slot_count=4)
+    result_b = archiver.extract_payload(vault, "beta password", output_b, slot_count=4)
+    result_raw = archiver.extract_payload(vault, "unrelated password", output_raw, slot_count=4)
+
+    assert result_a.raw_dumped is False
+    assert result_b.raw_dumped is False
+    assert result_raw.raw_dumped is True
+    assert (output_a / "a.txt").read_text(encoding="utf-8") == "alpha"
+    assert (output_b / "b.txt").read_text(encoding="utf-8") == "beta"
+    assert (output_raw / "decrypted_raw.bin").exists()
 
 
 def test_pyinstaller_build_script_help():
