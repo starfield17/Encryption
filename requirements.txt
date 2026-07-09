@@ -1,0 +1,4 @@
+cryptography
+PySide6
+pyinstaller
+
