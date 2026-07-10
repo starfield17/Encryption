@@ -499,14 +499,53 @@ class MainWindow(QMainWindow):
                 return slot
         return None
 
+    def _needed_slot_mib(self, estimate: int) -> int:
+        required = int((max(0, estimate) + SLOT_OVERHEAD) * 1.10) + 1
+        return max(1, (required + MIB - 1) // MIB)
+
+    def _has_any_estimate(self) -> bool:
+        return any(row.estimate is not None for row in self._payload_rows)
+
+    def _capacity_aware_assignment(self, layout: tuple[int, ...]) -> list[int]:
+        """Return slot_index for each payload row (capacity-aware greedy)."""
+        n = len(self._payload_rows)
+        if n == 0:
+            return []
+        if n > len(layout):
+            raise ValueError("not enough slots")
+        free = list(range(len(layout)))
+        free.sort(key=lambda i: zip_capacity_for_slot(layout[i]), reverse=True)
+        order = sorted(
+            range(n),
+            key=lambda i: self._payload_rows[i].estimate or 0,
+            reverse=True,
+        )
+        assignment = [0] * n
+        for row_i in order:
+            estimate = self._payload_rows[row_i].estimate or 0
+            # Prefer smallest capacity that still fits (among free, sorted desc → scan reverse)
+            candidates = sorted(free, key=lambda i: zip_capacity_for_slot(layout[i]))
+            chosen = None
+            for slot_i in candidates:
+                if estimate <= zip_capacity_for_slot(layout[slot_i]):
+                    chosen = slot_i
+                    break
+            if chosen is None:
+                chosen = max(free, key=lambda i: zip_capacity_for_slot(layout[i]))
+            assignment[row_i] = chosen
+            free.remove(chosen)
+        return assignment
+
     def _auto_assign_slots(self) -> None:
         layout = self._current_layout_safe()
         if len(self._payload_rows) > len(layout):
             self._show_warning(self.tr.t("gui.message.not_enough_slots"))
             return
-        for row, slot in zip(
-            self._payload_rows, self._spread_slot_indexes(len(self._payload_rows), len(layout)), strict=True
-        ):
+        if self._has_any_estimate():
+            slots = self._capacity_aware_assignment(layout)
+        else:
+            slots = self._spread_slot_indexes(len(self._payload_rows), len(layout))
+        for row, slot in zip(self._payload_rows, slots, strict=True):
             row.slot_index = slot
         self._sync_table_from_rows()
 
@@ -535,6 +574,15 @@ class MainWindow(QMainWindow):
             used.add(slot)
             result.append(slot)
         return result
+
+    def _all_payloads_fit(self, layout: tuple[int, ...], assignment: list[int]) -> bool:
+        for row, slot_i in zip(self._payload_rows, assignment, strict=True):
+            estimate = row.estimate
+            if estimate is None:
+                continue
+            if estimate > zip_capacity_for_slot(layout[slot_i]):
+                return False
+        return True
 
     def _format_size(self, size_bytes):
         if size_bytes is None:
@@ -589,7 +637,17 @@ class MainWindow(QMainWindow):
                 continue
             row.estimate = estimate.zip_size
             row.estimate_error = estimate.error
-        self._refresh_payload_planning()
+        # Re-pair to slots by capacity once estimates exist (equal or custom).
+        if self._payload_rows and all(row.estimate is not None or row.estimate_error for row in self._payload_rows):
+            if any(row.estimate is not None for row in self._payload_rows):
+                try:
+                    self._auto_assign_slots()
+                except Exception:
+                    self._refresh_payload_planning()
+            else:
+                self._refresh_payload_planning()
+        else:
+            self._refresh_payload_planning()
         self._finish_worker(self.tr.t("gui.message.analysis_complete"))
         if self._auto_plan_after_analysis:
             self._auto_plan_after_analysis = False
@@ -605,6 +663,64 @@ class MainWindow(QMainWindow):
             return
         self._apply_auto_plan()
 
+    def _recommended_slot_count(self, payload_count: int) -> int:
+        base = 4 if payload_count <= 2 else payload_count + 2
+        slot_count = max(payload_count + (0 if payload_count % 2 == 0 else 1), base)
+        if slot_count % 2:
+            slot_count += 1
+        return slot_count
+
+    def _build_custom_sizes_mib(self, slot_count: int) -> list[int]:
+        """Slot-index-ordered MiB sizes: payload needs placed on spread indexes, rest decoys."""
+        payload_count = len(self._payload_rows)
+        decoys = max(0, slot_count - payload_count)
+        sizes = [1] * slot_count
+        # Prefer spread indexes for occupied slots (deniability), fill largest needs first.
+        preferred = self._spread_slot_indexes(payload_count, slot_count)
+        order = sorted(
+            range(payload_count),
+            key=lambda i: self._payload_rows[i].estimate or 0,
+            reverse=True,
+        )
+        # Map largest payloads onto preferred slots sorted by eventual size need:
+        # place largest payload on first preferred index, etc.
+        for rank, row_i in enumerate(order):
+            slot_i = preferred[rank]
+            sizes[slot_i] = self._needed_slot_mib(self._payload_rows[row_i].estimate or 0)
+        # Ensure decoy slots stay at least 1 MiB (already).
+        _ = decoys
+        return sizes
+
+    def _grow_custom_layout_to_fit(self, layout: tuple[int, ...]) -> list[int]:
+        """Return MiB sizes (same length as layout) large enough after capacity-aware assign."""
+        sizes_mib = [max(1, (size + MIB - 1) // MIB) for size in layout]
+        # Iterate: assign, grow undersized slots, rebuild layout bytes, repeat.
+        for _ in range(16):
+            layout_bytes = tuple(s * MIB for s in sizes_mib)
+            assignment = self._capacity_aware_assignment(layout_bytes)
+            grew = False
+            for row, slot_i in zip(self._payload_rows, assignment, strict=True):
+                estimate = row.estimate or 0
+                need = self._needed_slot_mib(estimate)
+                if need > sizes_mib[slot_i]:
+                    sizes_mib[slot_i] = need
+                    grew = True
+            if not grew:
+                # Verify fit
+                layout_bytes = tuple(s * MIB for s in sizes_mib)
+                assignment = self._capacity_aware_assignment(layout_bytes)
+                if self._all_payloads_fit(layout_bytes, assignment):
+                    return sizes_mib
+                # Force grow largest failing
+                for row, slot_i in zip(self._payload_rows, assignment, strict=True):
+                    estimate = row.estimate or 0
+                    if estimate > zip_capacity_for_slot(layout_bytes[slot_i]):
+                        sizes_mib[slot_i] = max(sizes_mib[slot_i] + 1, self._needed_slot_mib(estimate))
+                        grew = True
+            if not grew:
+                break
+        return sizes_mib
+
     def _apply_auto_plan(self) -> None:
         if not self._payload_rows:
             self._show_warning(self.tr.t("gui.message.no_payloads"))
@@ -612,42 +728,108 @@ class MainWindow(QMainWindow):
         if any(row.estimate_error for row in self._payload_rows):
             self._show_warning(self.tr.t("gui.message.analysis_has_errors"))
             return
+        if any(row.estimate is None for row in self._payload_rows):
+            self._show_warning(self.tr.t("gui.message.analysis_required"))
+            return
+
         estimates = [row.estimate or 0 for row in self._payload_rows]
         max_zip = max(estimates) if estimates else 0
         payload_count = len(self._payload_rows)
-        base = 4 if payload_count <= 2 else payload_count + 2
-        slot_count = max(payload_count + (0 if payload_count % 2 == 0 else 1), base)
-        if slot_count % 2:
-            slot_count += 1
+        changes: list[str] = []
+
+        # Path A: already custom — grow to fit, keep slot count.
+        if self.layout_fields.is_custom():
+            try:
+                current_layout = self._current_layout()
+            except Exception as exc:
+                self._show_warning(str(exc))
+                return
+            assignment = self._capacity_aware_assignment(current_layout)
+            if self._all_payloads_fit(current_layout, assignment):
+                for row, slot in zip(self._payload_rows, assignment, strict=True):
+                    row.slot_index = slot
+                self._sync_table_from_rows()
+                self._set_status(self.tr.t("gui.message.plan_fits"))
+                return
+            new_sizes = self._grow_custom_layout_to_fit(current_layout)
+            changes.append(
+                self.tr.t(
+                    "gui.message.recommend_custom_layout",
+                    sizes=format_slot_sizes_mib([s * MIB for s in new_sizes]),
+                )
+            )
+            changes.append(self.tr.t("gui.message.recommend_size", size=sum(new_sizes)))
+            message = "\n".join(changes + [self.tr.t("gui.message.apply_recommendation")])
+            result = QMessageBox.question(
+                self,
+                self.tr.t("gui.message.info"),
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if result == QMessageBox.Yes:
+                self.layout_fields.set_custom_sizes_mib(new_sizes)
+                self.create_size_spin.setValue(sum(new_sizes))
+                self._auto_assign_slots()
+                self._set_status(self.tr.t("gui.message.plan_applied"))
+            else:
+                self._set_status(self.tr.t("gui.message.plan_fits"))
+            return
+
+        # Path B: equal mode — plan from scratch.
+        slot_count = self._recommended_slot_count(payload_count)
         required_slot = int((max_zip + SLOT_OVERHEAD) * 1.10) + 1
         equal_size_mib = max(1, (required_slot * slot_count + MIB - 1) // MIB)
         while (equal_size_mib * MIB) % slot_count != 0:
             equal_size_mib += 1
         avg = sum(estimates) / max(len(estimates), 1)
         use_custom = max_zip > 0 and max(estimates) > 2 * avg and payload_count >= 2
-        changes = []
+
+        # If equal already fits after capacity-aware assign on current equal layout, done.
+        try:
+            current_layout = self._current_layout()
+            assignment = self._capacity_aware_assignment(current_layout)
+            if self._all_payloads_fit(current_layout, assignment) and not use_custom:
+                for row, slot in zip(self._payload_rows, assignment, strict=True):
+                    row.slot_index = slot
+                self._sync_table_from_rows()
+                self._set_status(self.tr.t("gui.message.plan_fits"))
+                return
+        except Exception:
+            pass
+
         if use_custom:
-            decoys = max(0, slot_count - payload_count)
-            sizes = [max(1, (e + MIB - 1) // MIB) for e in estimates] + [1] * decoys
+            sizes = self._build_custom_sizes_mib(slot_count)
             total_mib = max(equal_size_mib, sum(sizes))
-            grow_index = estimates.index(max(estimates)) if estimates else 0
+            # Pad largest slot until sum matches total_mib
             while sum(sizes) < total_mib:
-                sizes[grow_index] += 1
-            while sum(sizes) > total_mib and max(sizes) > 1:
-                sizes[sizes.index(max(sizes))] -= 1
-            self.layout_fields.set_custom_sizes_mib(sizes)
-            self.create_size_spin.setValue(sum(sizes))
+                sizes[sizes.index(max(sizes))] += 1
             changes.append(
                 self.tr.t(
                     "gui.message.recommend_custom_layout",
-                    sizes=format_slot_sizes_mib([size * MIB for size in sizes]),
+                    sizes=format_slot_sizes_mib([s * MIB for s in sizes]),
                 )
             )
-        else:
-            self.layout_fields.set_equal_slots(slot_count)
-            self.create_size_spin.setValue(equal_size_mib)
-            changes.append(self.tr.t("gui.message.recommend_slot_count", count=slot_count))
-            changes.append(self.tr.t("gui.message.recommend_size", size=equal_size_mib))
+            changes.append(self.tr.t("gui.message.recommend_size", size=sum(sizes)))
+            message = "\n".join(changes + [self.tr.t("gui.message.apply_recommendation")])
+            result = QMessageBox.question(
+                self,
+                self.tr.t("gui.message.info"),
+                message,
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if result == QMessageBox.Yes:
+                self.layout_fields.set_custom_sizes_mib(sizes)
+                self.create_size_spin.setValue(sum(sizes))
+                self._auto_assign_slots()
+                self._set_status(self.tr.t("gui.message.plan_applied"))
+            else:
+                self._set_status(self.tr.t("gui.message.plan_fits"))
+            return
+
+        changes.append(self.tr.t("gui.message.recommend_slot_count", count=slot_count))
+        changes.append(self.tr.t("gui.message.recommend_size", size=equal_size_mib))
         message = "\n".join(changes + [self.tr.t("gui.message.apply_recommendation")])
         result = QMessageBox.question(
             self,
@@ -657,6 +839,8 @@ class MainWindow(QMainWindow):
             QMessageBox.Yes,
         )
         if result == QMessageBox.Yes:
+            self.layout_fields.set_equal_slots(slot_count)
+            self.create_size_spin.setValue(equal_size_mib)
             self._auto_assign_slots()
             self._set_status(self.tr.t("gui.message.plan_applied"))
         else:

@@ -375,6 +375,90 @@ def test_gui_analyze_and_auto_plan_helpers(monkeypatch, tmp_path):
         app.processEvents()
 
 
+def test_auto_assign_capacity_aware_with_custom_sizes(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source_small = tmp_path / "small"
+    source_large = tmp_path / "large"
+    source_small.mkdir()
+    source_large.mkdir()
+    try:
+        window.create_size_spin.setValue(100)
+        window.layout_fields.set_custom_sizes_mib([10, 40, 30, 20])
+        window._payload_rows.clear()
+        window._add_payload_row(0, str(source_large), "a", "a")
+        window._add_payload_row(0, str(source_small), "b", "b")
+        # Large then small estimates
+        window._payload_rows[0].estimate = 25 * 1024 * 1024
+        window._payload_rows[1].estimate = 1 * 1024 * 1024
+        window._auto_assign_slots()
+        slots = [row.slot_index for row in window._payload_rows]
+        # Largest estimate takes the smallest custom slot that still fits (30 MiB @ index 2)
+        assert slots[0] == 2
+        assert slots[1] in {0, 1, 3}
+        assert slots[0] != slots[1]
+        assert window._payload_rows[0].estimate <= window._slot_capacity_for_index(slots[0])
+        # Small payload must not take a larger slot than needed when a smaller free slot fits
+        assert window._slot_capacity_for_index(slots[1]) >= window._payload_rows[1].estimate
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_auto_assign_without_estimates_still_spreads(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source_a = tmp_path / "a"
+    source_b = tmp_path / "b"
+    source_a.mkdir()
+    source_b.mkdir()
+    try:
+        window._payload_rows.clear()
+        window._add_payload_row(0, str(source_a), "a", "a")
+        window._add_payload_row(0, str(source_b), "b", "b")
+        window._auto_assign_slots()
+        assert [row.slot_index for row in window._payload_rows] == [0, 2]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_auto_plan_grows_existing_custom_layout(monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from gui.main_window import MainWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(repo_root=source_root())
+    source = tmp_path / "source"
+    source.mkdir()
+    try:
+        window.create_size_spin.setValue(4)
+        window.layout_fields.set_custom_sizes_mib([1, 1, 1, 1])
+        window._payload_rows.clear()
+        window._add_payload_row(0, str(source), "pass", "pass")
+        window._payload_rows[0].estimate = 300_000
+        monkeypatch.setattr(QMessageBox, "question", lambda *args, **kwargs: QMessageBox.Yes)
+        window._apply_auto_plan()
+        assert window.layout_fields.is_custom()
+        assert window.create_size_spin.value() >= 4
+        assert window.payload_table.item(0, 4).text() == window.tr.t("gui.status_payload.ok")
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_analyze_payloads_worker_estimates_zip_size(tmp_path):
     from PySide6.QtWidgets import QApplication
 
