@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -43,9 +44,13 @@ class AnalyzePayloadsWorker(QThread):
             for row_index, source_dir in self.payload_sources:
                 try:
                     zip_bytes = archiver._zip_directory(source_dir, compress=self.compress)
-                    estimates.append(PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=len(zip_bytes)))
+                    estimates.append(
+                        PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=len(zip_bytes))
+                    )
                 except Exception as exc:
-                    estimates.append(PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=None, error=str(exc)))
+                    estimates.append(
+                        PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=None, error=str(exc))
+                    )
             self.completed.emit(estimates)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -72,7 +77,9 @@ class InitWorker(QThread):
 
     def run(self) -> None:
         try:
-            DeniableArchiver().initialize_container(self.container_path, self.size_mb, self.slot_count, self.zip_wrapper)
+            DeniableArchiver().initialize_container(
+                self.container_path, self.size_mb, self.slot_count, self.zip_wrapper
+            )
             self.completed.emit(self.success_message)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -127,10 +134,8 @@ class CreateContainerWorker(QThread):
             self.completed.emit(self.success_message)
         except Exception as exc:
             if temp_path is not None:
-                try:
+                with contextlib.suppress(Exception):
                     temp_path.unlink(missing_ok=True)
-                except Exception:
-                    pass
             self.failed.emit(str(exc))
 
 
@@ -212,7 +217,9 @@ class ExtractWorker(QThread):
         output_parent.mkdir(parents=True, exist_ok=True)
         archiver = DeniableArchiver()
         candidates = self._candidate_slot_counts()
-        with tempfile.TemporaryDirectory(prefix=f".{self.output_dir.name}.", suffix=".extract", dir=output_parent) as temp_root_raw:
+        with tempfile.TemporaryDirectory(
+            prefix=f".{self.output_dir.name}.", suffix=".extract", dir=output_parent
+        ) as temp_root_raw:
             temp_root = Path(temp_root_raw)
             for slot_count in candidates:
                 temp_output = temp_root / f"slots-{slot_count}"
@@ -256,7 +263,11 @@ class ExtractWorker(QThread):
         if slot_count < 2:
             return False
         try:
-            size = DeniableArchiver().slot_region_size(self.container_path) if slot_region_size is None else slot_region_size
+            size = (
+                DeniableArchiver().slot_region_size(self.container_path)
+                if slot_region_size is None
+                else slot_region_size
+            )
         except OSError:
             return True
         return size % slot_count == 0

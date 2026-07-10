@@ -19,4 +19,3 @@ def run_gui(argv: list[str] | None = None) -> int:
     window = MainWindow(repo_root=app_root(), language=args.lang)
     window.show()
     return app.exec()
-

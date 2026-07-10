@@ -122,7 +122,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.icon:
             print("Ignoring --icon because spec-mode builds read the icon from packaging/deniable_archiver.spec")
         if args.version_file:
-            print("Ignoring --version-file because spec-mode builds read metadata from packaging/deniable_archiver.spec")
+            print(
+                "Ignoring --version-file because spec-mode builds read metadata from packaging/deniable_archiver.spec"
+            )
 
     cmd, output_name = _pyinstaller_command(args)
     print("Running:", " ".join(cmd))
@@ -138,4 +140,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

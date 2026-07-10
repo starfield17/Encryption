@@ -7,8 +7,8 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 
-import pyzipper
 import pytest
+import pyzipper
 
 import core.archiver as archiver_module
 from cli.cli_entry import run_cli
@@ -175,8 +175,7 @@ def test_darc_cli_help_smoke():
         [sys.executable, "darc.py", "--help"],
         cwd=source_root(),
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 
@@ -556,7 +555,9 @@ def test_extract_worker_try_common_slot_counts_with_zip_wrapper(tmp_path):
     (visible / "readme.txt").write_text("visible", encoding="utf-8")
     (source / "file.txt").write_text("payload", encoding="utf-8")
     vault = tmp_path / "vault.zip"
-    archiver.initialize_container(vault, size_mb=1, slot_count=4, zip_wrapper=ZipWrapperOptions(enabled=True, visible_source_dir=visible))
+    archiver.initialize_container(
+        vault, size_mb=1, slot_count=4, zip_wrapper=ZipWrapperOptions(enabled=True, visible_source_dir=visible)
+    )
     archiver.write_payload(vault, source, "long unique passphrase", 2, slot_count=4)
 
     output = tmp_path / "output"
@@ -604,8 +605,7 @@ def test_pyinstaller_build_script_help():
         [sys.executable, str(script), "--help"],
         cwd=source_root(),
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         check=False,
     )
 

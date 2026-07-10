@@ -29,4 +29,3 @@ def clamped_window_size(
         height = min(height, max_height)
 
     return QSize(max(width, min_width), max(height, min_height))
-

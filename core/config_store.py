@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
-from typing import Any, Callable
+from typing import Any
 
 from core.app_paths import workdir_dir
-
 
 APP_CONFIG_NAME = "app_config.json"
 _APP_CONFIG_LOCK = RLock()

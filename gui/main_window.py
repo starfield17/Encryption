@@ -46,8 +46,14 @@ from core.config_store import load_app_config, load_preset, update_app_config
 from core.i18n import get_translator
 from gui.theme import apply_theme
 from gui.window_geometry import clamped_window_size
-from gui.workers import AnalyzePayloadsWorker, CreateContainerWorker, ExtractWorker, PayloadEstimate, PayloadInput, WriteWorker
-
+from gui.workers import (
+    AnalyzePayloadsWorker,
+    CreateContainerWorker,
+    ExtractWorker,
+    PayloadEstimate,
+    PayloadInput,
+    WriteWorker,
+)
 
 CONTAINER_FILTER = "ZIP-compatible containers (*.zip);;DARC containers (*.darc *.bin *.img);;All files (*)"
 PAYLOAD_SLOT_COL = 0
@@ -200,7 +206,9 @@ class MainWindow(QMainWindow):
         self.create_compress_check = QCheckBox()
         self.create_compress_check.setChecked(True)
 
-        self._add_path_row(form, 0, self.create_container_label, self.create_container_edit, self.create_container_button)
+        self._add_path_row(
+            form, 0, self.create_container_label, self.create_container_edit, self.create_container_button
+        )
         form.addWidget(self.create_size_label, 1, 0)
         form.addWidget(self.create_size_spin, 1, 1)
         form.addWidget(self.create_slots_label, 2, 0)
@@ -234,8 +242,12 @@ class MainWindow(QMainWindow):
         self.zip_entry_show_password_check = QCheckBox()
 
         wrapper_form.addWidget(self.zip_wrapper_check, 0, 1)
-        self._add_path_row(wrapper_form, 1, self.zip_visible_source_label, self.zip_visible_source_edit, self.zip_visible_source_button)
-        self._add_path_row(wrapper_form, 2, self.zip_entry_source_label, self.zip_entry_source_edit, self.zip_entry_source_button)
+        self._add_path_row(
+            wrapper_form, 1, self.zip_visible_source_label, self.zip_visible_source_edit, self.zip_visible_source_button
+        )
+        self._add_path_row(
+            wrapper_form, 2, self.zip_entry_source_label, self.zip_entry_source_edit, self.zip_entry_source_button
+        )
         wrapper_form.addWidget(self.zip_entry_mode_label, 3, 0)
         wrapper_form.addWidget(self.zip_entry_mode_combo, 3, 1)
         wrapper_form.addWidget(self.zip_entry_name_label, 4, 0)
@@ -388,7 +400,9 @@ class MainWindow(QMainWindow):
         self.extract_try_common_slots_check = QCheckBox()
         self.extract_run_button = QPushButton()
 
-        self._add_path_row(form, 0, self.extract_container_label, self.extract_container_edit, self.extract_container_button)
+        self._add_path_row(
+            form, 0, self.extract_container_label, self.extract_container_edit, self.extract_container_button
+        )
         self._add_path_row(form, 1, self.extract_output_label, self.extract_output_edit, self.extract_output_button)
         form.addWidget(self.extract_slots_label, 2, 0)
         form.addWidget(self.extract_slots_spin, 2, 1)
@@ -678,7 +692,9 @@ class MainWindow(QMainWindow):
             return row
         return None
 
-    def _add_payload_row(self, slot_index: int | None = None, source_dir: str = "", password: str = "", confirm: str = "") -> None:
+    def _add_payload_row(
+        self, slot_index: int | None = None, source_dir: str = "", password: str = "", confirm: str = ""
+    ) -> None:
         row = self.payload_table.rowCount()
         self.payload_table.insertRow(row)
         self._payload_passwords.append(password)
@@ -733,7 +749,7 @@ class MainWindow(QMainWindow):
         if len(rows) > slot_count:
             self._show_warning(self.tr.t("gui.message.not_enough_slots"))
             return
-        for row, slot in zip(rows, self._spread_slot_indexes(len(rows), slot_count)):
+        for row, slot in zip(rows, self._spread_slot_indexes(len(rows), slot_count), strict=True):
             self._payload_slot_spin(row).setValue(slot)
         self._refresh_payload_planning()
 
@@ -913,9 +929,7 @@ class MainWindow(QMainWindow):
             return False
         if len(password) >= 20:
             return False
-        if len([part for part in password.split() if part]) >= 6:
-            return False
-        return True
+        return len([part for part in password.split() if part]) < 6
 
     def _payload_sources_changed(self) -> None:
         for row in range(self.payload_table.rowCount()):
@@ -1050,7 +1064,11 @@ class MainWindow(QMainWindow):
             return
 
         current_slots = self.create_slots_spin.value()
-        recommended_slots = max(current_slots, self._recommended_slot_count(payload_count)) if current_slots < payload_count else current_slots
+        recommended_slots = (
+            max(current_slots, self._recommended_slot_count(payload_count))
+            if current_slots < payload_count
+            else current_slots
+        )
         estimates = [estimate for estimate in self._payload_estimates if estimate is not None]
         max_zip_size = max(estimates) if estimates else 0
         current_size = self.create_size_spin.value()
@@ -1136,7 +1154,9 @@ class MainWindow(QMainWindow):
         if isinstance(visible_source, str):
             return None, visible_source
 
-        entry_source = self._optional_directory(self.zip_entry_source_edit, "gui.message.passworded_entry_source_missing")
+        entry_source = self._optional_directory(
+            self.zip_entry_source_edit, "gui.message.passworded_entry_source_missing"
+        )
         if isinstance(entry_source, str):
             return None, entry_source
 
@@ -1181,7 +1201,9 @@ class MainWindow(QMainWindow):
             seen.add(payload.password)
         return False
 
-    def _zip_entry_password_matches_payload(self, zip_wrapper: ZipWrapperOptions | None, payloads: list[PayloadInput]) -> bool:
+    def _zip_entry_password_matches_payload(
+        self, zip_wrapper: ZipWrapperOptions | None, payloads: list[PayloadInput]
+    ) -> bool:
         if zip_wrapper is None or not zip_wrapper.encrypted_entry_password:
             return False
         return any(payload.password == zip_wrapper.encrypted_entry_password for payload in payloads)

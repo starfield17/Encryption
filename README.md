@@ -12,10 +12,25 @@ This project does not provide legal, coercion-resistant, or mathematically perfe
 python -m pip install -r requirements.txt
 ```
 
+Dev tools (lint/format/tests):
+
+```bash
+python -m pip install -r requirements-dev.txt
+```
+
 Run tests:
 
 ```bash
 python -m pytest
+```
+
+Lint and format with [Ruff](https://docs.astral.sh/ruff/) (config in `pyproject.toml`):
+
+```bash
+ruff check .
+ruff format --check .
+# apply formatting:
+ruff format .
 ```
 
 ## CLI

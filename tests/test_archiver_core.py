@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import stat
+import subprocess
 import zipfile
 from io import BytesIO
 
-import pyzipper
 import pytest
+import pyzipper
 
 import core.archiver as archiver_module
 from core.archiver import (
@@ -219,7 +219,9 @@ def test_zip_wrapper_visible_only_passes_infozip_test(tmp_path):
         zip_wrapper=ZipWrapperOptions(enabled=True, visible_source_dir=visible),
     )
 
-    result = subprocess.run(["zip", "-T", str(vault)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False)
+    result = subprocess.run(
+        ["zip", "-T", str(vault)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False
+    )
 
     assert result.returncode == 0
     assert "test of" in result.stdout

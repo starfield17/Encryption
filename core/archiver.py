@@ -15,7 +15,6 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-
 DEFAULT_CONTAINER_SIZE_MB = 100
 DEFAULT_SLOT_COUNT = 4
 
@@ -209,7 +208,9 @@ class DeniableArchiver:
             handle.write(os.urandom(chunk_size))
             remaining -= chunk_size
 
-    def _parse_zip_suffix_offset(self, container: Path, file_size: int, tail: bytes, eocd_tail_index: int) -> int | None:
+    def _parse_zip_suffix_offset(
+        self, container: Path, file_size: int, tail: bytes, eocd_tail_index: int
+    ) -> int | None:
         if eocd_tail_index + ZIP_EOCD_LEN > len(tail):
             return None
         eocd_abs = file_size - len(tail) + eocd_tail_index
@@ -234,7 +235,9 @@ class DeniableArchiver:
             return None
         if total_entries and not self._has_central_directory_signature(container, central_start):
             return None
-        prefix_offset = self._prefix_offset_from_central_directory(container, central_start, central_size, central_offset, total_entries)
+        prefix_offset = self._prefix_offset_from_central_directory(
+            container, central_start, central_size, central_offset, total_entries
+        )
         if prefix_offset is None:
             return None
         try:
@@ -269,7 +272,11 @@ class DeniableArchiver:
             return None
 
         relative_prefix = central_start - central_offset
-        if relative_prefix >= 0 and (relative_prefix > 0 or entries[0] == 0) and self._has_local_file_signature(container, relative_prefix + entries[0]):
+        if (
+            relative_prefix >= 0
+            and (relative_prefix > 0 or entries[0] == 0)
+            and self._has_local_file_signature(container, relative_prefix + entries[0])
+        ):
             return relative_prefix
 
         absolute_prefix = min(entries)
@@ -277,7 +284,9 @@ class DeniableArchiver:
             return absolute_prefix
         return None
 
-    def _central_directory_local_offsets(self, container: Path, central_start: int, central_size: int, total_entries: int) -> list[int]:
+    def _central_directory_local_offsets(
+        self, container: Path, central_start: int, central_size: int, total_entries: int
+    ) -> list[int]:
         offsets: list[int] = []
         with container.open("rb") as handle:
             handle.seek(central_start)
@@ -332,7 +341,9 @@ class DeniableArchiver:
         if PAYLOAD_HEADER_LEN + len(zip_bytes) > blob_len:
             raise ValueError("Payload too large for selected slot")
         zip_sha256 = hashlib.sha256(zip_bytes).digest()
-        header = PAYLOAD_HEADER_STRUCT.pack(PAYLOAD_MAGIC, PAYLOAD_VERSION, PAYLOAD_HEADER_LEN, len(zip_bytes), zip_sha256)
+        header = PAYLOAD_HEADER_STRUCT.pack(
+            PAYLOAD_MAGIC, PAYLOAD_VERSION, PAYLOAD_HEADER_LEN, len(zip_bytes), zip_sha256
+        )
         padding_len = blob_len - len(header) - len(zip_bytes)
         return header + zip_bytes + os.urandom(padding_len)
 
@@ -560,7 +571,9 @@ class DeniableArchiver:
             return None
         return self._parse_payload_blob(blob)
 
-    def _validate_zip(self, zip_bytes: bytes, output_dir: Path, max_total_size: int) -> list[tuple[zipfile.ZipInfo, Path]]:
+    def _validate_zip(
+        self, zip_bytes: bytes, output_dir: Path, max_total_size: int
+    ) -> list[tuple[zipfile.ZipInfo, Path]]:
         output_root = output_dir.resolve()
         total_size = 0
         file_count = 0
@@ -628,7 +641,14 @@ class DeniableArchiver:
         if part.rstrip(" .") != part:
             raise UnsafeZipError("Unsafe zip entry name")
         stem = part.split(".", 1)[0].upper()
-        reserved_names = {"CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10))}
+        reserved_names = {
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            *(f"COM{index}" for index in range(1, 10)),
+            *(f"LPT{index}" for index in range(1, 10)),
+        }
         if stem in reserved_names:
             raise UnsafeZipError("Unsafe zip entry name")
 

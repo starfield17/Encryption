@@ -94,4 +94,3 @@ def apply_theme(widget: QWidget) -> None:
         }
         """
     )
-

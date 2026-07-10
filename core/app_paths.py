@@ -64,4 +64,3 @@ def ensure_runtime_layout() -> tuple[Path, Path]:
         (runtime_workdir / name).mkdir(parents=True, exist_ok=True)
 
     return runtime_config, runtime_workdir
-

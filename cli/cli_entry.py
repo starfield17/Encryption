@@ -26,11 +26,21 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--size-mb", type=int, default=DEFAULT_CONTAINER_SIZE_MB, help="Container size in MiB")
     init_parser.add_argument("--slots", type=int, default=DEFAULT_SLOT_COUNT, help="Number of fixed-size slots")
     wrapper_group = init_parser.add_mutually_exclusive_group()
-    wrapper_group.add_argument("--zip-wrapper", dest="zip_wrapper", action="store_true", default=True, help="Append a ZIP-compatible visible layer")
-    wrapper_group.add_argument("--raw", dest="zip_wrapper", action="store_false", help="Create a raw random-looking container")
+    wrapper_group.add_argument(
+        "--zip-wrapper",
+        dest="zip_wrapper",
+        action="store_true",
+        default=True,
+        help="Append a ZIP-compatible visible layer",
+    )
+    wrapper_group.add_argument(
+        "--raw", dest="zip_wrapper", action="store_false", help="Create a raw random-looking container"
+    )
     init_parser.add_argument("--visible-source", help="Directory to expose as ordinary ZIP entries")
     init_parser.add_argument("--passworded-entry-source", help="Directory to store as a passworded ZIP entry")
-    init_parser.add_argument("--passworded-entry-name", default=DEFAULT_WRAPPER_ENTRY_NAME, help="Name of the passworded ZIP entry")
+    init_parser.add_argument(
+        "--passworded-entry-name", default=DEFAULT_WRAPPER_ENTRY_NAME, help="Name of the passworded ZIP entry"
+    )
     init_parser.add_argument(
         "--passworded-entry-mode",
         choices=[ZIP_ENTRY_MODE_ARCHIVE, ZIP_ENTRY_MODE_FILES],
@@ -82,12 +92,16 @@ def run_cli(argv: list[str] | None = None) -> int:
                 zip_wrapper = ZipWrapperOptions(
                     enabled=True,
                     visible_source_dir=Path(args.visible_source) if args.visible_source else None,
-                    encrypted_entry_source_dir=Path(args.passworded_entry_source) if args.passworded_entry_source else None,
+                    encrypted_entry_source_dir=Path(args.passworded_entry_source)
+                    if args.passworded_entry_source
+                    else None,
                     encrypted_entry_name=args.passworded_entry_name,
                     encrypted_entry_password=_prompt_zip_entry_password() if args.passworded_entry_source else None,
                     encrypted_entry_mode=args.passworded_entry_mode,
                 )
-            archiver.initialize_container(Path(args.container), size_mb=args.size_mb, slot_count=args.slots, zip_wrapper=zip_wrapper)
+            archiver.initialize_container(
+                Path(args.container), size_mb=args.size_mb, slot_count=args.slots, zip_wrapper=zip_wrapper
+            )
             print("Container initialized.")
             return 0
         if args.command == "write":
@@ -104,7 +118,9 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "extract":
             password = getpass.getpass("Password: ")
-            result = archiver.extract_payload(Path(args.container), password, Path(args.output_dir), slot_count=args.slots)
+            result = archiver.extract_payload(
+                Path(args.container), password, Path(args.output_dir), slot_count=args.slots
+            )
             print(result.message)
             return 0
     except Exception as exc:
