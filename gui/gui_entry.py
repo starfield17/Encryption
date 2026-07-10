@@ -6,6 +6,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from core.app_paths import app_root, ensure_runtime_layout
+from gui.fonts import load_bundled_ui_font
 from gui.main_window import MainWindow
 
 
@@ -16,6 +17,7 @@ def run_gui(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     app = QApplication(sys.argv[:1] + (argv or []))
+    load_bundled_ui_font(app)
     window = MainWindow(repo_root=app_root(), language=args.lang)
     window.show()
     return app.exec()

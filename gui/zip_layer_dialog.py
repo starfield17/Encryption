@@ -163,6 +163,8 @@ class ZipLayerDialog(QDialog):
                 return None, self.tr.t("gui.message.password_mismatch")
         elif state.entry_password or state.entry_confirm:
             return None, self.tr.t("gui.message.passworded_entry_source_required")
+        if visible is None and entry is None:
+            return None, self.tr.t("gui.message.zip_wrapper_source_required")
         return (
             ZipWrapperOptions(
                 enabled=True,

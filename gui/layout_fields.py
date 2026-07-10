@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.i18n import Translator
-from core.layout import MIB, equal_layout, parse_slot_sizes_mib, resolve_layout
+from core.layout import MAX_SLOT_COUNT, MIB, equal_layout, parse_slot_sizes_mib, resolve_layout
 
 
 class LayoutFieldGroup(QWidget):
@@ -31,7 +31,7 @@ class LayoutFieldGroup(QWidget):
 
         self.slots_label = QLabel()
         self.slots_spin = QSpinBox()
-        self.slots_spin.setRange(2, 256)
+        self.slots_spin.setRange(2, MAX_SLOT_COUNT)
         self.slots_spin.setValue(default_slots)
 
         self.sizes_label = QLabel()

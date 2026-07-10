@@ -11,6 +11,7 @@ import pytest
 import pyzipper
 
 import core.archiver as archiver_module
+import core.format_v3 as format_v3
 from cli.cli_entry import run_cli
 from core.app_paths import ensure_runtime_layout, source_root
 from core.config_store import load_app_config, load_preset, save_app_config
@@ -19,7 +20,7 @@ from core.i18n import get_translator
 
 @pytest.fixture(autouse=True)
 def fast_scrypt(monkeypatch):
-    monkeypatch.setattr(archiver_module, "SCRYPT_N", 2**12)
+    monkeypatch.setattr(format_v3, "SCRYPT_N", 2**12)
 
 
 def test_language_pack_and_preset_load():
@@ -34,8 +35,8 @@ def test_language_pack_and_preset_load():
     preset = load_preset("default_standard", config_dir)
     assert preset["container_size_mb"] == 100
     assert preset["slot_count"] == 4
-    assert preset["default_extension"] == ".zip"
-    assert archiver_module.SCRYPT_N == 2**12
+    assert preset["default_extension"] == ".darc"
+    assert format_v3.SCRYPT_N == 2**12
 
 
 def test_app_config_has_defaults():
@@ -91,6 +92,7 @@ def test_cli_init_zip_wrapper_with_visible_and_passworded_entry(monkeypatch, tmp
                 "1",
                 "--slots",
                 "4",
+                "--zip-wrapper",
                 "--visible-source",
                 str(visible),
                 "--passworded-entry-source",
@@ -132,6 +134,7 @@ def test_cli_init_zip_wrapper_with_direct_passworded_entries(monkeypatch, tmp_pa
                 "1",
                 "--slots",
                 "4",
+                "--zip-wrapper",
                 "--visible-source",
                 str(visible),
                 "--passworded-entry-source",
@@ -193,19 +196,19 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
     window = MainWindow(repo_root=source_root())
     try:
         assert window.windowTitle()
-        assert window.payload_table.rowCount() == 1
+        assert window.payload_table.rowCount() == 0
         assert window.payload_table.columnCount() == 5
         assert window.add_payload_button.text() == "Add Folder"
         assert window.create_compress_check.isChecked()
-        assert window.default_extension == ".zip"
-        assert window.create_container_edit.placeholderText() == "Choose a new .zip container path"
+        assert window.default_extension == ".darc"
+        assert window.create_container_edit.placeholderText() == "Choose a new .darc container path"
         assert window.create_box.title() == "Container file"
         assert window.layout_box.title() == "Slot layout"
-        assert window._zip_state.enabled is True
-        assert window.write_action.text().startswith("Write")
+        assert window._zip_state.enabled is False
+        assert window.write_action.text().startswith("Update")
         assert window.extract_action.text().startswith("Extract")
         assert window.settings_action.text().startswith("Settings")
-        assert not hasattr(window, "tabs")
+        assert window.tabs.count() == 3
     finally:
         window.close()
         app.processEvents()
@@ -224,8 +227,6 @@ def test_gui_create_validation_helpers(monkeypatch, tmp_path):
     source_a.mkdir()
     source_b.mkdir()
     try:
-        window.payload_table.selectRow(0)
-        window._remove_selected_payload()
         payloads, error = window._collect_create_payloads()
         assert payloads is None
         assert error == window.tr.t("gui.message.no_payloads")
@@ -485,7 +486,8 @@ def test_analyze_payloads_worker_estimates_zip_size(tmp_path):
     assert compressed_results[0][0].zip_size is not None
     assert stored_results[0][0].zip_size is not None
     assert compressed_results[0][0].zip_size > 0
-    assert stored_results[0][0].zip_size > compressed_results[0][0].zip_size
+    assert stored_results[0][0].zip_size == compressed_results[0][0].zip_size
+    assert compressed_results[0][0].uncompressed_size == len("hello" * 1000)
 
 
 def test_create_container_worker_writes_multiple_payloads(tmp_path):
@@ -515,17 +517,17 @@ def test_create_container_worker_writes_multiple_payloads(tmp_path):
     archiver = archiver_module.DeniableArchiver()
     output_a = tmp_path / "out-a"
     output_b = tmp_path / "out-b"
-    output_raw = tmp_path / "out-raw"
+    output_raw = tmp_path / "out-no-match"
     result_a = archiver.extract_payload(vault, "alpha password", output_a, slot_count=4)
     result_b = archiver.extract_payload(vault, "beta password", output_b, slot_count=4)
     result_raw = archiver.extract_payload(vault, "unrelated password", output_raw, slot_count=4)
 
     assert result_a.raw_dumped is False
     assert result_b.raw_dumped is False
-    assert result_raw.raw_dumped is True
+    assert result_raw.status is archiver_module.ExtractionStatus.NO_MATCH
     assert (output_a / "a.txt").read_text(encoding="utf-8") == "alpha"
     assert (output_b / "b.txt").read_text(encoding="utf-8") == "beta"
-    assert (output_raw / "decrypted_raw.bin").exists()
+    assert not output_raw.exists()
 
 
 def test_extract_worker_try_common_slot_counts_stays_blind(tmp_path):
@@ -554,16 +556,18 @@ def test_extract_worker_try_common_slot_counts_stays_blind(tmp_path):
     assert not (output / "decrypted_raw.bin").exists()
     assert not list(tmp_path.glob(".output.*.extract"))
 
-    raw_output = tmp_path / "raw-output"
-    raw_completed = []
-    raw_worker = ExtractWorker(vault, "unrelated passphrase", raw_output, slot_count=2, try_common_slot_counts=True)
-    raw_worker.completed.connect(raw_completed.append)
-    raw_worker.run()
+    no_match_output = tmp_path / "no-match-output"
+    no_match_completed = []
+    no_match_worker = ExtractWorker(
+        vault, "unrelated passphrase", no_match_output, slot_count=2, try_common_slot_counts=True
+    )
+    no_match_worker.completed.connect(no_match_completed.append)
+    no_match_worker.run()
     app.processEvents()
 
-    assert raw_completed == [archiver_module.RAW_DUMP_MESSAGE]
-    assert (raw_output / "decrypted_raw.bin").exists()
-    assert not list(tmp_path.glob(".raw-output.*.extract"))
+    assert no_match_completed == [archiver_module.NO_MATCH_MESSAGE]
+    assert not no_match_output.exists()
+    assert not list(tmp_path.glob(".no-match-output.*.extract"))
 
 
 def test_extract_worker_try_common_slot_counts_with_zip_wrapper(tmp_path):
@@ -651,4 +655,4 @@ def test_readme_uses_generic_commands_only():
     ]
     for text in forbidden:
         assert text not in readme
-    assert "python darc.py init vault.zip --size-mb 100 --slots 4" in readme
+    assert "python darc.py init vault.darc --size-mb 100 --slots 4" in readme

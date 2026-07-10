@@ -2,20 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from core.format_v3 import SLOT_PREFIX_LEN, TAG_LEN, archive_capacity_for_slot, record_plaintext_lengths
+
 MIB = 1024 * 1024
-SALT_LEN = 16
-NONCE_LEN = 12
-TAG_LEN = 16
-PAYLOAD_HEADER_LEN = 48
-# salt + nonce + tag + PAYL header — minimum bytes before any ZIP payload fits
-MIN_SLOT_BYTES = SALT_LEN + NONCE_LEN + TAG_LEN + PAYLOAD_HEADER_LEN
+MIN_SLOT_BYTES = SLOT_PREFIX_LEN + TAG_LEN + 1
 
 DEFAULT_SLOT_COUNT = 4
+MAX_SLOT_COUNT = 16
 
 
 def equal_layout(region_size: int, slot_count: int) -> tuple[int, ...]:
     if slot_count < 2:
         raise ValueError("slot_count must be at least 2")
+    if slot_count > MAX_SLOT_COUNT:
+        raise ValueError(f"slot_count must not exceed {MAX_SLOT_COUNT}")
     if region_size <= 0:
         raise ValueError("Container size must be greater than 0")
     if region_size % slot_count != 0:
@@ -26,13 +26,16 @@ def equal_layout(region_size: int, slot_count: int) -> tuple[int, ...]:
 
 
 def validate_slot_size(slot_size: int) -> None:
-    if slot_size <= MIN_SLOT_BYTES:
+    if slot_size < MIN_SLOT_BYTES:
         raise ValueError("Slot size is too small")
+    record_plaintext_lengths(slot_size)
 
 
 def normalize_layout(layout: Sequence[int], *, expected_total: int | None = None) -> tuple[int, ...]:
     if len(layout) < 2:
         raise ValueError("layout must contain at least 2 slots")
+    if len(layout) > MAX_SLOT_COUNT:
+        raise ValueError(f"layout must not contain more than {MAX_SLOT_COUNT} slots")
     sizes = tuple(int(size) for size in layout)
     if any(size <= 0 for size in sizes):
         raise ValueError("Each slot size must be greater than 0")
@@ -65,8 +68,11 @@ def slot_offset(layout: Sequence[int], slot_index: int) -> int:
 
 
 def zip_capacity_for_slot(slot_size: int) -> int:
-    """Maximum ZIP payload bytes that fit in a slot."""
-    return max(0, slot_size - MIN_SLOT_BYTES)
+    """Maximum compressed archive bytes that fit in a v3 slot."""
+    try:
+        return archive_capacity_for_slot(slot_size)
+    except ValueError:
+        return 0
 
 
 def parse_slot_sizes_mib(raw: str) -> tuple[int, ...]:

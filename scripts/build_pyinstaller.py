@@ -7,6 +7,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+COLLECT_SUBMODULE_PACKAGES = ("cli", "core", "gui")
+UPX_ENV_VAR = "DENIABLE_ARCHIVER_ENABLE_UPX"
+
 
 def project_root() -> Path:
     return Path(__file__).resolve().parent.parent
@@ -53,6 +56,14 @@ def _add_data_arg(source: Path, target: str) -> str:
     return f"{source}{separator}{target}"
 
 
+def bundled_data_paths() -> list[tuple[Path, str]]:
+    paths = [(project_root() / "config", "config")]
+    fonts = assets_dir() / "fonts"
+    if fonts.is_dir():
+        paths.append((fonts, "fonts"))
+    return paths
+
+
 def _uses_script_build(args: argparse.Namespace) -> bool:
     return bool(args.onefile or args.windowed or args.name)
 
@@ -67,14 +78,18 @@ def _pyinstaller_command(args: argparse.Namespace) -> tuple[list[str], str]:
             "-m",
             "PyInstaller",
             "--noconfirm",
+            "--specpath",
+            str(project_root() / "build"),
             str(project_root() / "main.py"),
             "--name",
             output_name,
             "--paths",
             str(project_root()),
-            "--add-data",
-            _add_data_arg(project_root() / "config", "config"),
         ]
+        for package in COLLECT_SUBMODULE_PACKAGES:
+            cmd.extend(["--collect-submodules", package])
+        for source, target in bundled_data_paths():
+            cmd.extend(["--add-data", _add_data_arg(source, target)])
         if args.clean:
             cmd.append("--clean")
         if args.windowed:
@@ -92,8 +107,6 @@ def _pyinstaller_command(args: argparse.Namespace) -> tuple[list[str], str]:
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", str(spec_path())]
     if args.clean:
         cmd.append("--clean")
-    if not args.upx:
-        cmd.append("--noupx")
     return cmd, "deniable-archiver"
 
 
@@ -111,12 +124,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--name", help="Override the output executable name")
     parser.add_argument("--icon", help="Optional path to the application icon")
     parser.add_argument("--version-file", help="Optional Windows version metadata file")
-    parser.add_argument("--upx", action=argparse.BooleanOptionalAction, default=True, help="Enable or disable UPX")
+    parser.add_argument(
+        "--upx",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Opt in to UPX executable compression (disabled by default)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print the build command without running it")
     args = parser.parse_args(argv)
 
     root = project_root()
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    if args.upx:
+        env[UPX_ENV_VAR] = "1"
+    else:
+        env.pop(UPX_ENV_VAR, None)
 
     if not _uses_script_build(args):
         if args.icon:
@@ -128,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd, output_name = _pyinstaller_command(args)
     print("Running:", " ".join(cmd))
+    if args.dry_run:
+        print(f"Dry run complete (UPX {'enabled' if args.upx else 'disabled'}); no build was run.")
+        return 0
     subprocess.run(cmd, check=True, cwd=root, env=env)
 
     target_dir = dist_dir() if args.onefile else dist_dir() / output_name

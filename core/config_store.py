@@ -1,29 +1,29 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from core.app_paths import workdir_dir
+from core.app_paths import user_config_dir
 
 APP_CONFIG_NAME = "app_config.json"
 _APP_CONFIG_LOCK = RLock()
 
 
 def presets_dir(config_dir: Path) -> Path:
-    path = config_dir / "presets"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return config_dir / "presets"
 
 
 def app_config_path(config_dir: Path) -> Path:
     del config_dir
-    runtime_workdir = workdir_dir()
-    runtime_workdir.mkdir(parents=True, exist_ok=True)
-    return runtime_workdir / APP_CONFIG_NAME
+    runtime_config = user_config_dir()
+    runtime_config.mkdir(parents=True, exist_ok=True)
+    return runtime_config / APP_CONFIG_NAME
 
 
 def _preset_path(name: str, config_dir: Path) -> Path:
@@ -73,8 +73,45 @@ def _load_app_config_unlocked(config_dir: Path) -> dict[str, Any]:
 def _save_app_config_unlocked(config_dir: Path, data: dict[str, Any]) -> Path:
     path = app_config_path(config_dir)
     data = _normalize_app_config(data)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _write_json_atomic(path, data)
     return path
+
+
+def _write_json_atomic(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(data, temporary_file, indent=2, ensure_ascii=False)
+            temporary_file.write("\n")
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        os.replace(temporary_path, path)
+        temporary_path = None
+        _fsync_directory(path.parent)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
+def _fsync_directory(directory: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 def load_app_config(config_dir: Path) -> dict[str, Any]:

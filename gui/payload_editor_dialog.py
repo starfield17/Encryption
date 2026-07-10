@@ -47,7 +47,7 @@ class PayloadEditorDialog(QDialog):
         self.repo_root = repo_root
         self._build_ui(max_slot)
         self.source_edit.setText(source_dir)
-        self.slot_spin.setValue(slot_index)
+        self.slot_spin.setValue(slot_index + 1)
         self.password_group.set_password(password, confirm)
         self.apply_translations(tr)
 
@@ -58,7 +58,7 @@ class PayloadEditorDialog(QDialog):
 
         self.slot_label = QLabel()
         self.slot_spin = QSpinBox()
-        self.slot_spin.setRange(0, max(0, max_slot))
+        self.slot_spin.setRange(1, max(1, max_slot + 1))
         form.addWidget(self.slot_label, 0, 0)
         form.addWidget(self.slot_spin, 0, 1)
 
@@ -98,7 +98,7 @@ class PayloadEditorDialog(QDialog):
             source_dir=self.source_edit.text().strip(),
             password=self.password_group.password(),
             confirm=self.password_group.confirm(),
-            slot_index=self.slot_spin.value(),
+            slot_index=self.slot_spin.value() - 1,
         )
 
     def validate_values(self) -> str | None:
@@ -110,6 +110,8 @@ class PayloadEditorDialog(QDialog):
             return self.tr.t("gui.message.source_missing")
         if not self.password_group.passwords_match():
             return self.tr.t("gui.message.password_mismatch")
+        if not self.password_group.password():
+            return self.tr.t("gui.message.password_required")
         return None
 
     def accept(self) -> None:

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.i18n import Translator
+from core.layout import MAX_SLOT_COUNT
 from gui.layout_fields import LayoutFieldGroup
 from gui.password_fields import PasswordFieldGroup
 from gui.workers import WriteWorker
@@ -58,7 +59,7 @@ class WriteSlotDialog(QDialog):
 
         self.slot_label = QLabel()
         self.slot_spin = QSpinBox()
-        self.slot_spin.setRange(0, 255)
+        self.slot_spin.setRange(1, MAX_SLOT_COUNT)
         form.addWidget(self.slot_label, 2, 0)
         form.addWidget(self.slot_spin, 2, 1)
 
@@ -132,6 +133,9 @@ class WriteSlotDialog(QDialog):
         if not self.password_group.passwords_match():
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.password_mismatch"))
             return
+        if not self.password_group.password():
+            QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.password_required"))
+            return
         container = Path(container_raw)
         source = Path(source_raw)
         try:
@@ -139,15 +143,30 @@ class WriteSlotDialog(QDialog):
 
             region = DeniableArchiver().slot_region_size(container)
             kwargs = self.layout_fields.layout_kwargs(region)
+            resolved_layout = self.layout_fields.resolve(region)
         except Exception as exc:
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
+            return
+
+        slot_index = self.slot_spin.value() - 1
+        if slot_index >= len(resolved_layout):
+            QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.slot_out_of_range"))
+            return
+        confirmation = QMessageBox.question(
+            self,
+            self.tr.t("gui.message.warning"),
+            self.tr.t("gui.message.confirm_slot_replace", slot=self.slot_spin.value()),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirmation != QMessageBox.Yes:
             return
 
         worker = WriteWorker(
             container,
             source,
             self.password_group.password(),
-            self.slot_spin.value(),
+            slot_index,
             kwargs.get("slot_count"),  # type: ignore[arg-type]
             self.compress_check.isChecked(),
             self.tr.t("gui.message.write_complete"),

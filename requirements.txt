@@ -1,4 +1,7 @@
 cryptography
+filelock
+platformdirs
 PySide6
 pyinstaller
 pyzipper
+zstandard>=0.23,<1

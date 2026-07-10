@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-import shutil
+import os
 import sys
 from pathlib import Path
+
+from platformdirs import PlatformDirs
+
+APP_NAME = "DeniableArchiver"
+PORTABLE_ENV_VAR = "DARC_PORTABLE"
 
 
 def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
+
+
+def is_portable() -> bool:
+    return os.environ.get(PORTABLE_ENV_VAR) == "1"
 
 
 def source_root() -> Path:
@@ -29,38 +38,46 @@ def app_root() -> Path:
 
 
 def config_dir() -> Path:
-    return app_root() / "config"
+    return bundle_root() / "config"
+
+
+def _platform_dirs() -> PlatformDirs:
+    return PlatformDirs(APP_NAME, appauthor=False)
+
+
+def user_config_dir() -> Path:
+    if is_portable():
+        return app_root() / "workdir"
+    return _platform_dirs().user_config_path
+
+
+def user_data_dir() -> Path:
+    if is_portable():
+        return app_root() / "workdir"
+    return _platform_dirs().user_data_path
+
+
+def user_cache_dir() -> Path:
+    if is_portable():
+        return app_root() / "workdir"
+    return _platform_dirs().user_cache_path
 
 
 def workdir_dir() -> Path:
-    return app_root() / "workdir"
-
-
-def _copy_tree_if_missing(source_dir: Path, target_dir: Path) -> None:
-    if not source_dir.exists() or source_dir.resolve() == target_dir.resolve():
-        return
-    for item in source_dir.rglob("*"):
-        relative = item.relative_to(source_dir)
-        target = target_dir / relative
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(item, target)
+    return user_data_dir()
 
 
 def ensure_runtime_layout() -> tuple[Path, Path]:
-    runtime_root = app_root()
-    runtime_root.mkdir(parents=True, exist_ok=True)
-
-    runtime_config = config_dir()
+    resource_config = config_dir()
+    runtime_config = user_config_dir()
     runtime_workdir = workdir_dir()
+    runtime_cache = user_cache_dir()
+
     runtime_config.mkdir(parents=True, exist_ok=True)
     runtime_workdir.mkdir(parents=True, exist_ok=True)
+    runtime_cache.mkdir(parents=True, exist_ok=True)
 
-    _copy_tree_if_missing(bundle_root() / "config", runtime_config)
-    for name in ("logs", "temp"):
-        (runtime_workdir / name).mkdir(parents=True, exist_ok=True)
+    (runtime_workdir / "logs").mkdir(parents=True, exist_ok=True)
+    (runtime_cache / "temp").mkdir(parents=True, exist_ok=True)
 
-    return runtime_config, runtime_workdir
+    return resource_config, runtime_workdir

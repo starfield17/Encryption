@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.archiver import ConflictPolicy
 from core.i18n import Translator
 from gui.layout_fields import LayoutFieldGroup
 from gui.password_fields import PasswordFieldGroup
@@ -130,6 +131,9 @@ class ExtractDialog(QDialog):
         if not output_raw:
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.select_output"))
             return
+        if not self.password_group.password():
+            QMessageBox.warning(self, self.tr.t("gui.message.warning"), self.tr.t("gui.message.password_required"))
+            return
         container = Path(container_raw)
         output = Path(output_raw)
         try:
@@ -141,6 +145,19 @@ class ExtractDialog(QDialog):
             QMessageBox.warning(self, self.tr.t("gui.message.warning"), str(exc))
             return
 
+        conflict_policy = ConflictPolicy.FAIL
+        if output.exists() and output.is_dir() and any(output.iterdir()):
+            confirmation = QMessageBox.question(
+                self,
+                self.tr.t("gui.message.warning"),
+                self.tr.t("gui.message.replace_output"),
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirmation != QMessageBox.Yes:
+                return
+            conflict_policy = ConflictPolicy.REPLACE
+
         worker = ExtractWorker(
             container,
             self.password_group.password(),
@@ -148,6 +165,7 @@ class ExtractDialog(QDialog):
             slot_count=kwargs.get("slot_count"),  # type: ignore[arg-type]
             try_common_slot_counts=self.try_common_check.isChecked(),
             layout=kwargs.get("layout"),  # type: ignore[arg-type]
+            conflict_policy=conflict_policy,
         )
         self.start_worker(worker, self.tr.t("gui.status.extracting"))
         self.accept()

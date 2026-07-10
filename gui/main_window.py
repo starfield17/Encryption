@@ -3,12 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QAbstractScrollArea,
     QCheckBox,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -22,27 +23,44 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QSpinBox,
     QStatusBar,
     QStyle,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from core.archiver import DEFAULT_CONTAINER_SIZE_MB, DEFAULT_SLOT_COUNT, DEFAULT_WRAPPER_ENTRY_NAME
+from core.app_paths import config_dir as resource_config_dir
+from core.archiver import (
+    DEFAULT_CONTAINER_SIZE_MB,
+    DEFAULT_SLOT_COUNT,
+    DEFAULT_WRAPPER_ENTRY_NAME,
+    MAX_CONTAINER_SIZE_MB,
+    OperationProgress,
+)
 from core.config_store import load_app_config, load_preset, update_app_config
 from core.i18n import get_translator
-from core.layout import MIB, equal_layout, format_slot_sizes_mib, zip_capacity_for_slot
+from core.layout import MAX_SLOT_COUNT, MIB, equal_layout, format_slot_sizes_mib, zip_capacity_for_slot
 from gui.extract_dialog import ExtractDialog
 from gui.layout_fields import LayoutFieldGroup
 from gui.payload_editor_dialog import PayloadEditorDialog
 from gui.settings_dialog import SettingsDialog
 from gui.theme import apply_theme
 from gui.window_geometry import clamped_window_size
-from gui.workers import AnalyzePayloadsWorker, CreateContainerWorker, PayloadEstimate, PayloadInput
+from gui.workers import (
+    AnalyzePayloadsWorker,
+    CreateContainerWorker,
+    ExtractWorker,
+    PayloadEstimate,
+    PayloadInput,
+    WriteWorker,
+)
 from gui.write_dialog import WriteSlotDialog
 from gui.zip_layer_dialog import ZipLayerDialog, ZipLayerState
 
@@ -52,7 +70,6 @@ PAYLOAD_SOURCE_COL = 1
 PAYLOAD_ESTIMATE_COL = 2
 PAYLOAD_CAPACITY_COL = 3
 PAYLOAD_STATUS_COL = 4
-SLOT_OVERHEAD = 16 + 12 + 16 + 48
 
 
 @dataclass
@@ -102,11 +119,31 @@ class PayloadTableWidget(QTableWidget):
         return result
 
 
+class EmbeddedWritePage(WriteSlotDialog):
+    """WriteSlotDialog adapted for use as a persistent task page."""
+
+    def accept(self) -> None:
+        pass
+
+    def reject(self) -> None:
+        pass
+
+
+class EmbeddedExtractPage(ExtractDialog):
+    """ExtractDialog adapted for use as a persistent task page."""
+
+    def accept(self) -> None:
+        pass
+
+    def reject(self) -> None:
+        pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self, repo_root: Path, language: str | None = None) -> None:
         super().__init__()
         self.repo_root = repo_root
-        self.config_dir = repo_root / "config"
+        self.config_dir = resource_config_dir()
         self.app_config = load_app_config(self.config_dir)
         self.language = language or str(self.app_config.get("language", "en"))
         self.tr = get_translator(self.language, self.config_dir)
@@ -114,7 +151,7 @@ class MainWindow(QMainWindow):
         self._payload_rows: list[PayloadRow] = []
         self._auto_plan_after_analysis = False
         self._zip_state = ZipLayerState(
-            enabled=True,
+            enabled=False,
             visible_source="",
             entry_source="",
             entry_mode="archive",
@@ -126,12 +163,12 @@ class MainWindow(QMainWindow):
         preset = self._load_default_preset()
         self.default_container_size_mb = int(preset.get("container_size_mb", DEFAULT_CONTAINER_SIZE_MB))
         self.default_slot_count = int(preset.get("slot_count", DEFAULT_SLOT_COUNT))
-        self.default_extension = str(preset.get("default_extension", ".zip"))
+        configured_extension = str(preset.get("default_extension", ".darc"))
+        self.default_extension = ".darc" if configured_extension == ".zip" else configured_extension
         self._build_ui()
         self._connect_signals()
         self._apply_translations()
         self._set_busy(False)
-        self._add_payload_row()
 
     def _load_default_preset(self) -> dict[str, object]:
         name = str(self.app_config.get("default_preset_name", "default_standard"))
@@ -141,14 +178,16 @@ class MainWindow(QMainWindow):
             return {
                 "container_size_mb": DEFAULT_CONTAINER_SIZE_MB,
                 "slot_count": DEFAULT_SLOT_COUNT,
-                "default_extension": ".zip",
+                "default_extension": ".darc",
             }
 
     def _build_ui(self) -> None:
         apply_theme(self)
         self.resize(clamped_window_size(860, 620, minimum_width=740, minimum_height=520))
+
         toolbar = QToolBar(self)
         toolbar.setMovable(False)
+        toolbar.setIconSize(QSize(18, 18))
         toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.addToolBar(Qt.TopToolBarArea, toolbar)
         self.toolbar = toolbar
@@ -156,21 +195,38 @@ class MainWindow(QMainWindow):
         self.write_action = QAction(style.standardIcon(QStyle.SP_DialogSaveButton), "", self)
         self.extract_action = QAction(style.standardIcon(QStyle.SP_DialogOpenButton), "", self)
         self.settings_action = QAction(style.standardIcon(QStyle.SP_FileDialogDetailedView), "", self)
-        toolbar.addAction(self.write_action)
-        toolbar.addAction(self.extract_action)
-        toolbar.addSeparator()
+        toolbar_spacer = QWidget(toolbar)
+        toolbar_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(toolbar_spacer)
         toolbar.addAction(self.settings_action)
 
-        central = QScrollArea(self)
-        central.setWidgetResizable(True)
-        central.setFrameShape(QFrame.NoFrame)
-        central.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        central = QWidget(self)
         self.setCentralWidget(central)
-        content = QWidget(self)
-        central.setWidget(content)
-        root = QVBoxLayout(content)
-        root.setContentsMargins(10, 10, 10, 10)
-        root.setSpacing(8)
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(10, 8, 10, 6)
+        central_layout.setSpacing(6)
+
+        self.tabs = QTabWidget(central)
+        self.tabs.setDocumentMode(True)
+        central_layout.addWidget(self.tabs, 1)
+
+        self.create_page = QWidget(self.tabs)
+        create_page_layout = QVBoxLayout(self.create_page)
+        create_page_layout.setContentsMargins(8, 8, 8, 8)
+        create_page_layout.setSpacing(6)
+
+        self.create_scroll = QScrollArea(self.create_page)
+        self.create_scroll.setWidgetResizable(True)
+        self.create_scroll.setFrameShape(QFrame.NoFrame)
+        self.create_scroll.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        self.create_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        create_page_layout.addWidget(self.create_scroll, 1)
+
+        create_content = QWidget(self.create_scroll)
+        self.create_scroll.setWidget(create_content)
+        root = QVBoxLayout(create_content)
+        root.setContentsMargins(2, 2, 2, 2)
+        root.setSpacing(6)
 
         self.create_box = QGroupBox()
         form = QGridLayout(self.create_box)
@@ -179,18 +235,33 @@ class MainWindow(QMainWindow):
         self.create_container_button = QPushButton()
         self.create_size_label = QLabel()
         self.create_size_spin = QSpinBox()
-        self.create_size_spin.setRange(1, 1024 * 1024)
+        self.create_size_spin.setRange(1, MAX_CONTAINER_SIZE_MB)
         self.create_size_spin.setValue(self.default_container_size_mb)
-        self.create_compress_check = QCheckBox()
-        self.create_compress_check.setChecked(True)
+        self.advanced_button = QToolButton()
+        self.advanced_button.setCheckable(True)
+        self.advanced_button.setArrowType(Qt.RightArrow)
+        self.advanced_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self._add_path_row(
             form, 0, self.create_container_label, self.create_container_edit, self.create_container_button
         )
+        size_row = QWidget()
+        size_row_layout = QHBoxLayout(size_row)
+        size_row_layout.setContentsMargins(0, 0, 0, 0)
+        size_row_layout.addWidget(self.create_size_spin)
+        size_row_layout.addStretch(1)
+        size_row_layout.addWidget(self.advanced_button)
         form.addWidget(self.create_size_label, 1, 0)
-        form.addWidget(self.create_size_spin, 1, 1)
-        form.addWidget(self.create_compress_check, 2, 1)
+        form.addWidget(size_row, 1, 1)
         form.setColumnStretch(1, 1)
         root.addWidget(self.create_box)
+
+        self.advanced_panel = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced_panel)
+        advanced_layout.setContentsMargins(0, 0, 0, 4)
+        advanced_layout.setSpacing(6)
+        self.create_compress_check = QCheckBox()
+        self.create_compress_check.setChecked(True)
+        advanced_layout.addWidget(self.create_compress_check)
 
         self.layout_box = QGroupBox()
         layout_form = QVBoxLayout(self.layout_box)
@@ -199,14 +270,16 @@ class MainWindow(QMainWindow):
         self.layout_hint.setWordWrap(True)
         layout_form.addWidget(self.layout_fields)
         layout_form.addWidget(self.layout_hint)
-        root.addWidget(self.layout_box)
+        advanced_layout.addWidget(self.layout_box)
 
         zip_row = QHBoxLayout()
         self.zip_summary_label = QLabel()
         self.zip_configure_button = QPushButton()
         zip_row.addWidget(self.zip_summary_label, 1)
         zip_row.addWidget(self.zip_configure_button)
-        root.addLayout(zip_row)
+        advanced_layout.addLayout(zip_row)
+        self.advanced_panel.setVisible(False)
+        root.addWidget(self.advanced_panel)
 
         self.payload_box = QGroupBox()
         payload_layout = QVBoxLayout(self.payload_box)
@@ -219,38 +292,98 @@ class MainWindow(QMainWindow):
         self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_ESTIMATE_COL, QHeaderView.ResizeToContents)
         self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_CAPACITY_COL, QHeaderView.ResizeToContents)
         self.payload_table.horizontalHeader().setSectionResizeMode(PAYLOAD_STATUS_COL, QHeaderView.ResizeToContents)
-        self.payload_table.setMinimumHeight(200)
+        self.payload_table.setMinimumHeight(105)
         payload_layout.addWidget(self.payload_table)
         buttons = QHBoxLayout()
+        buttons.setSpacing(6)
         self.add_payload_button = QPushButton()
         self.edit_payload_button = QPushButton()
         self.remove_payload_button = QPushButton()
-        self.analyze_payloads_button = QPushButton()
+        self.analyze_payloads_button = QPushButton(self.payload_box)
         self.auto_plan_button = QPushButton()
-        self.auto_assign_button = QPushButton()
-        for button in [
-            self.add_payload_button,
-            self.edit_payload_button,
-            self.remove_payload_button,
-            self.analyze_payloads_button,
-            self.auto_plan_button,
-            self.auto_assign_button,
-        ]:
+        self.auto_assign_button = QPushButton(self.payload_box)
+        self.add_payload_button.setIcon(style.standardIcon(QStyle.SP_DirOpenIcon))
+        self.edit_payload_button.setIcon(style.standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.remove_payload_button.setIcon(style.standardIcon(QStyle.SP_TrashIcon))
+        self.auto_plan_button.setIcon(style.standardIcon(QStyle.SP_BrowserReload))
+        for button in [self.add_payload_button, self.edit_payload_button, self.remove_payload_button]:
             buttons.addWidget(button)
         buttons.addStretch(1)
+        buttons.addWidget(self.auto_plan_button)
+        self.analyze_payloads_button.hide()
+        self.auto_assign_button.hide()
         payload_layout.addLayout(buttons)
         root.addWidget(self.payload_box, 1)
 
         bottom = QHBoxLayout()
+        bottom.setSpacing(8)
         self.create_hint_label = QLabel()
         self.create_hint_label.setWordWrap(True)
         self.create_run_button = QPushButton()
+        self.create_run_button.setObjectName("primaryAction")
+        self.create_run_button.setIcon(style.standardIcon(QStyle.SP_DialogSaveButton))
         bottom.addWidget(self.create_hint_label, 1)
         bottom.addWidget(self.create_run_button)
-        root.addLayout(bottom)
+        create_page_layout.addLayout(bottom)
+
+        self.write_page = EmbeddedWritePage(
+            self.tr, self.repo_root, self.default_slot_count, self._start_worker, self.tabs
+        )
+        self.extract_page = EmbeddedExtractPage(
+            self.tr, self.repo_root, self.default_slot_count, self._start_worker, self.tabs
+        )
+        task_pages = []
+        for page, primary_icon in (
+            (self.write_page, QStyle.SP_DialogSaveButton),
+            (self.extract_page, QStyle.SP_DialogOpenButton),
+        ):
+            page.setWindowFlags(Qt.Widget)
+            page.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            page.layout().setContentsMargins(14, 12, 14, 12)
+            page.layout().removeWidget(page.button_box)
+            cancel_button = page.button_box.button(QDialogButtonBox.Cancel)
+            if cancel_button is not None:
+                cancel_button.hide()
+            primary_button = page.button_box.button(QDialogButtonBox.Ok)
+            if primary_button is not None:
+                primary_button.setObjectName("primaryAction")
+                primary_button.setIcon(style.standardIcon(primary_icon))
+
+            task_page = QWidget(self.tabs)
+            task_layout = QVBoxLayout(task_page)
+            task_layout.setContentsMargins(8, 8, 8, 8)
+            task_layout.setSpacing(6)
+            task_scroll = QScrollArea(task_page)
+            task_scroll.setWidgetResizable(True)
+            task_scroll.setFrameShape(QFrame.NoFrame)
+            task_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            task_scroll.setWidget(page)
+            task_layout.addWidget(task_scroll, 1)
+            task_layout.addWidget(page.button_box)
+            task_pages.append(task_page)
+
+        self.write_task_page, self.extract_task_page = task_pages
+
+        self.create_tab_index = self.tabs.addTab(self.create_page, style.standardIcon(QStyle.SP_FileIcon), "")
+        self.write_tab_index = self.tabs.addTab(
+            self.write_task_page, style.standardIcon(QStyle.SP_DialogSaveButton), ""
+        )
+        self.extract_tab_index = self.tabs.addTab(
+            self.extract_task_page, style.standardIcon(QStyle.SP_DialogOpenButton), ""
+        )
+
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(6)
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(False)
-        root.addWidget(self.progress_bar)
+        self.progress_bar.setFixedHeight(6)
+        self.cancel_button = QPushButton()
+        self.cancel_button.setIcon(style.standardIcon(QStyle.SP_DialogCancelButton))
+        self.cancel_button.setVisible(False)
+        progress_row.addWidget(self.progress_bar, 1)
+        progress_row.addWidget(self.cancel_button)
+        central_layout.addLayout(progress_row)
+
         status = QStatusBar(self)
         self.setStatusBar(status)
         self.status_label = QLabel()
@@ -270,6 +403,8 @@ class MainWindow(QMainWindow):
         self.extract_action.triggered.connect(self._open_extract_dialog)
         self.settings_action.triggered.connect(self._open_settings_dialog)
         self.create_container_button.clicked.connect(self._browse_create_container)
+        self.cancel_button.clicked.connect(self._cancel_active_worker)
+        self.advanced_button.toggled.connect(self._toggle_advanced)
         self.zip_configure_button.clicked.connect(self._open_zip_dialog)
         self.add_payload_button.clicked.connect(self._add_payload_from_button)
         self.edit_payload_button.clicked.connect(self._edit_selected_payload)
@@ -298,6 +433,7 @@ class MainWindow(QMainWindow):
         self.create_compress_check.setText(self.tr.t("gui.label.compress_payload"))
         self.create_container_button.setText(self.tr.t("gui.button.browse_file"))
         self.create_container_edit.setPlaceholderText(self.tr.t("gui.placeholder.container_new"))
+        self.advanced_button.setText(self.tr.t("gui.button.advanced_settings"))
         self.layout_box.setTitle(self.tr.t("gui.group.layout"))
         self.layout_fields.apply_translations(self.tr)
         self.layout_hint.setText(self.tr.t("gui.hint.layout_secret"))
@@ -310,8 +446,14 @@ class MainWindow(QMainWindow):
         self.auto_plan_button.setText(self.tr.t("gui.button.auto_plan"))
         self.auto_assign_button.setText(self.tr.t("gui.button.auto_assign_slots"))
         self.create_run_button.setText(self.tr.t("gui.button.create"))
+        self.cancel_button.setText(self.tr.t("gui.button.cancel"))
         self.create_hint_label.setText(self.tr.t("gui.hint.payloads"))
         self.zip_configure_button.setText(self.tr.t("gui.button.configure_zip_layer"))
+        self.write_page.apply_translations(self.tr)
+        self.extract_page.apply_translations(self.tr)
+        self.tabs.setTabText(self.create_tab_index, self.tr.t("gui.tab.create"))
+        self.tabs.setTabText(self.write_tab_index, self.tr.t("gui.tab.write_slot"))
+        self.tabs.setTabText(self.extract_tab_index, self.tr.t("gui.tab.extract"))
         self.payload_table.setHorizontalHeaderLabels(
             [
                 self.tr.t("gui.table.slot"),
@@ -323,6 +465,10 @@ class MainWindow(QMainWindow):
         )
         self._refresh_payload_planning()
         self._set_status(self.tr.t("gui.status.ready"))
+
+    def _toggle_advanced(self, expanded: bool) -> None:
+        self.advanced_button.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+        self.advanced_panel.setVisible(expanded)
 
     def _refresh_zip_summary(self) -> None:
         key = "gui.summary.zip_on" if self._zip_state.enabled else "gui.summary.zip_off"
@@ -358,10 +504,10 @@ class MainWindow(QMainWindow):
             self._refresh_zip_summary()
 
     def _open_write_dialog(self) -> None:
-        WriteSlotDialog(self.tr, self.repo_root, self.default_slot_count, self._start_worker, self).exec()
+        self.tabs.setCurrentIndex(self.write_tab_index)
 
     def _open_extract_dialog(self) -> None:
-        ExtractDialog(self.tr, self.repo_root, self.default_slot_count, self._start_worker, self).exec()
+        self.tabs.setCurrentIndex(self.extract_tab_index)
 
     def _current_layout(self) -> tuple[int, ...]:
         return self.layout_fields.resolve_for_size_mb(self.create_size_spin.value())
@@ -477,7 +623,7 @@ class MainWindow(QMainWindow):
         for index, payload in enumerate(self._payload_rows):
             self.payload_table.insertRow(index)
             values = [
-                (PAYLOAD_SLOT_COL, str(payload.slot_index)),
+                (PAYLOAD_SLOT_COL, str(payload.slot_index + 1)),
                 (PAYLOAD_SOURCE_COL, payload.source_dir or "-"),
                 (PAYLOAD_ESTIMATE_COL, self._format_size(payload.estimate)),
                 (PAYLOAD_CAPACITY_COL, self._format_size(self._slot_capacity_for_index(payload.slot_index))),
@@ -500,8 +646,11 @@ class MainWindow(QMainWindow):
         return None
 
     def _needed_slot_mib(self, estimate: int) -> int:
-        required = int((max(0, estimate) + SLOT_OVERHEAD) * 1.10) + 1
-        return max(1, (required + MIB - 1) // MIB)
+        target = int(max(0, estimate) * 1.10) + 1
+        size_mib = 1
+        while zip_capacity_for_slot(size_mib * MIB) < target:
+            size_mib += 1
+        return size_mib
 
     def _has_any_estimate(self) -> bool:
         return any(row.estimate is not None for row in self._payload_rows)
@@ -668,7 +817,7 @@ class MainWindow(QMainWindow):
         slot_count = max(payload_count + (0 if payload_count % 2 == 0 else 1), base)
         if slot_count % 2:
             slot_count += 1
-        return slot_count
+        return min(MAX_SLOT_COUNT, slot_count)
 
     def _build_custom_sizes_mib(self, slot_count: int) -> list[int]:
         """Slot-index-ordered MiB sizes: payload needs placed on spread indexes, rest decoys."""
@@ -778,10 +927,7 @@ class MainWindow(QMainWindow):
 
         # Path B: equal mode — plan from scratch.
         slot_count = self._recommended_slot_count(payload_count)
-        required_slot = int((max_zip + SLOT_OVERHEAD) * 1.10) + 1
-        equal_size_mib = max(1, (required_slot * slot_count + MIB - 1) // MIB)
-        while (equal_size_mib * MIB) % slot_count != 0:
-            equal_size_mib += 1
+        equal_size_mib = self._needed_slot_mib(max_zip) * slot_count
         avg = sum(estimates) / max(len(estimates), 1)
         use_custom = max_zip > 0 and max(estimates) > 2 * avg and payload_count >= 2
 
@@ -868,6 +1014,8 @@ class MainWindow(QMainWindow):
                 return None, self.tr.t("gui.message.source_missing")
             if row.password != row.confirm:
                 return None, self.tr.t("gui.message.password_mismatch")
+            if not row.password:
+                return None, self.tr.t("gui.message.password_required")
             payloads.append(
                 PayloadInput(
                     slot_index=row.slot_index,
@@ -902,15 +1050,8 @@ class MainWindow(QMainWindow):
             self._show_warning(error)
             return
         if self._has_duplicate_passwords(payloads):
-            result = QMessageBox.question(
-                self,
-                self.tr.t("gui.message.warning"),
-                self.tr.t("gui.message.duplicate_passwords"),
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if result != QMessageBox.Yes:
-                return
+            self._show_warning(self.tr.t("gui.message.duplicate_passwords"))
+            return
         if self._zip_password_matches(zip_wrapper, payloads):
             result = QMessageBox.question(
                 self,
@@ -945,6 +1086,7 @@ class MainWindow(QMainWindow):
             zip_wrapper,
             self.tr.t("gui.message.create_complete"),
             layout=kwargs.get("layout"),
+            replace_existing=container.exists(),
         )
         self._start_worker(worker, self.tr.t("gui.status.creating"))
 
@@ -968,6 +1110,10 @@ class MainWindow(QMainWindow):
         self.active_worker = worker
         worker.completed.connect(completed_handler or self._worker_completed)
         worker.failed.connect(self._worker_failed)
+        if hasattr(worker, "cancelled"):
+            worker.cancelled.connect(self._worker_cancelled)
+        if hasattr(worker, "progress"):
+            worker.progress.connect(self._worker_progress)
         worker.finished.connect(worker.deleteLater)
         self._set_busy(True)
         self._set_status(status_text)
@@ -982,23 +1128,73 @@ class MainWindow(QMainWindow):
         self._finish_worker(sanitized)
         self._show_error(sanitized)
 
+    def _worker_cancelled(self, _message: str) -> None:
+        self._finish_worker(self.tr.t("gui.message.cancelled"))
+
+    def _worker_progress(self, progress: OperationProgress) -> None:
+        total = max(1, progress.total)
+        value = max(0, min(1000, int(progress.current * 1000 / total)))
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(value)
+        self._set_status(self.tr.t(f"gui.stage.{progress.stage.value}"))
+
+    def _cancel_active_worker(self) -> None:
+        if self.active_worker is None:
+            return
+        self.cancel_button.setEnabled(False)
+        self._set_status(self.tr.t("gui.status.cancelling"))
+        if hasattr(self.active_worker, "cancel"):
+            self.active_worker.cancel()
+        else:
+            self.active_worker.requestInterruption()
+
     def _finish_worker(self, message: str) -> None:
+        worker = self.active_worker
         self.active_worker = None
+        if isinstance(worker, CreateContainerWorker):
+            for row in self._payload_rows:
+                row.password = ""
+                row.confirm = ""
+            self._zip_state.entry_password = ""
+            self._zip_state.entry_confirm = ""
+        elif isinstance(worker, WriteWorker):
+            self.write_page.password_group.set_password("")
+        elif isinstance(worker, ExtractWorker):
+            self.extract_page.password_group.set_password("")
         self._set_busy(False)
         self._set_status(message)
 
     def _set_busy(self, busy: bool) -> None:
         self.toolbar.setEnabled(not busy)
-        self.create_box.setEnabled(not busy)
-        self.layout_box.setEnabled(not busy)
-        self.payload_box.setEnabled(not busy)
-        self.create_run_button.setEnabled(not busy)
-        self.zip_configure_button.setEnabled(not busy)
+        self.tabs.setEnabled(not busy)
+        self.cancel_button.setVisible(busy)
+        self.cancel_button.setEnabled(busy)
         if busy:
             self.progress_bar.setRange(0, 0)
         else:
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(0)
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self.active_worker is None or not self.active_worker.isRunning():
+            event.accept()
+            return
+        result = QMessageBox.question(
+            self,
+            self.tr.t("gui.message.warning"),
+            self.tr.t("gui.message.cancel_and_close"),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if result != QMessageBox.Yes:
+            event.ignore()
+            return
+        self._cancel_active_worker()
+        if self.active_worker is not None and not self.active_worker.wait(5000):
+            self._show_warning(self.tr.t("gui.message.wait_for_operation"))
+            event.ignore()
+            return
+        event.accept()
 
     def _set_status(self, message: str) -> None:
         self.status_label.setText(message)

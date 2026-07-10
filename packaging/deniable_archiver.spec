@@ -1,5 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_submodules
@@ -8,6 +9,7 @@ from PyInstaller.utils.hooks import collect_submodules
 project_root = Path(SPECPATH).parent
 assets_root = project_root / "packaging" / "assets"
 version_file = project_root / "packaging" / "windows_version_info.txt"
+upx_enabled = os.environ.get("DENIABLE_ARCHIVER_ENABLE_UPX") == "1"
 
 
 def _default_icon() -> str | None:
@@ -25,6 +27,9 @@ def _default_icon() -> str | None:
 
 
 datas = [(str(project_root / "config"), "config")]
+fonts_root = assets_root / "fonts"
+if fonts_root.is_dir():
+    datas.append((str(fonts_root), "fonts"))
 hiddenimports = collect_submodules("cli") + collect_submodules("core") + collect_submodules("gui")
 
 
@@ -51,7 +56,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    upx=upx_enabled,
     console=True,
     icon=_default_icon(),
     version=str(version_file) if version_file.exists() else None,
@@ -62,8 +67,7 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
+    upx=upx_enabled,
     upx_exclude=[],
     name="deniable-archiver",
 )
-
