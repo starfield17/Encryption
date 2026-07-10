@@ -193,29 +193,19 @@ def test_gui_window_instantiates_offscreen(monkeypatch):
     window = MainWindow(repo_root=source_root())
     try:
         assert window.windowTitle()
-        assert window.tabs.count() == 4
-        assert window.tabs.currentIndex() == 0
-        assert window.tabs.tabText(0) == "Create"
-        assert window.tabs.tabText(1) == "Write Slot"
         assert window.payload_table.rowCount() == 1
         assert window.payload_table.columnCount() == 5
-        assert window.payload_detail_box.title() == "Selected payload"
         assert window.add_payload_button.text() == "Add Folder"
         assert window.create_compress_check.isChecked()
         assert window.default_extension == ".zip"
         assert window.create_container_edit.placeholderText() == "Choose a new .zip container path"
-        assert window.zip_wrapper_check.isChecked()
         assert window.create_box.title() == "Container file"
-        assert window.zip_wrapper_box.title() == "ZIP-compatible layer"
-        assert window.zip_entry_mode_combo.currentData() == "archive"
-        assert window.zip_entry_name_edit.text() == "Documents.zip"
-        assert window.write_compress_check.isChecked()
-        assert not window.detail_show_password_check.isChecked()
-        assert not window.detail_skip_confirm_check.isChecked()
-        assert not window.extract_try_common_slots_check.isChecked()
-        assert window.extract_slots_label.text() == "Slot count used when created"
-        assert not hasattr(window, "runtime_box")
-        assert window.tabs.widget(3) is window.settings_tab
+        assert window.layout_box.title() == "Slot layout"
+        assert window._zip_state.enabled is True
+        assert window.write_action.text().startswith("Write")
+        assert window.extract_action.text().startswith("Extract")
+        assert window.settings_action.text().startswith("Settings")
+        assert not hasattr(window, "tabs")
     finally:
         window.close()
         app.processEvents()
@@ -246,12 +236,11 @@ def test_gui_create_validation_helpers(monkeypatch, tmp_path):
         assert payloads is None
         assert error == window.tr.t("gui.message.duplicate_slots")
 
-        window.payload_table.clearSelection()
         window._auto_assign_slots()
-        slots = [window._payload_slot_spin(row).value() for row in range(window.payload_table.rowCount())]
+        slots = [row.slot_index for row in window._payload_rows]
         assert slots == [0, 2]
 
-        window._payload_confirms[1] = "different"
+        window._payload_rows[1].confirm = "different"
         payloads, error = window._collect_create_payloads()
         assert payloads is None
         assert error == window.tr.t("gui.message.password_mismatch")
@@ -276,13 +265,14 @@ def test_gui_adds_multiple_payload_folders_and_filters_drop_urls(monkeypatch, tm
     source_b.mkdir()
     ignored_file.write_text("not a directory", encoding="utf-8")
     try:
+        window._payload_rows.clear()
         added = window._add_payload_sources([source_a, ignored_file, source_b])
 
         assert added == 2
         assert window.payload_table.rowCount() == 2
-        assert window._payload_source_edit(0).text() == str(source_a)
-        assert window._payload_source_edit(1).text() == str(source_b)
-        slots = [window._payload_slot_spin(row).value() for row in range(window.payload_table.rowCount())]
+        assert window._payload_rows[0].source_dir == str(source_a)
+        assert window._payload_rows[1].source_dir == str(source_b)
+        slots = [row.slot_index for row in window._payload_rows]
         assert len(slots) == len(set(slots))
 
         mime = QMimeData()
@@ -294,11 +284,13 @@ def test_gui_adds_multiple_payload_folders_and_filters_drop_urls(monkeypatch, tm
         app.processEvents()
 
 
-def test_gui_password_visibility_hint_and_skip_confirm(monkeypatch, tmp_path):
+def test_gui_password_and_zip_helpers(monkeypatch, tmp_path):
     monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication, QLineEdit
 
     from gui.main_window import MainWindow
+    from gui.password_fields import PasswordFieldGroup
+    from gui.zip_layer_dialog import ZipLayerDialog, ZipLayerState
 
     app = QApplication.instance() or QApplication([])
     window = MainWindow(repo_root=source_root())
@@ -306,99 +298,48 @@ def test_gui_password_visibility_hint_and_skip_confirm(monkeypatch, tmp_path):
     source.mkdir()
     (source / "file.txt").write_text("payload", encoding="utf-8")
     try:
-        window._payload_source_edit(0).setText(str(source))
-        window._payload_estimates[0] = 1
-        window.detail_password_edit.setText("short")
-        window.detail_confirm_edit.setText("different")
-
-        assert window.tr.t("gui.message.weak_password_hint") in window.detail_password_hint_label.text()
+        window._payload_rows.clear()
+        window._add_payload_row(0, str(source), "short", "different")
+        window._payload_rows[0].estimate = 1
         payloads, error = window._collect_create_payloads()
         assert payloads is None
         assert error == window.tr.t("gui.message.password_mismatch")
 
-        window.detail_show_password_check.setChecked(True)
-        assert window.detail_password_edit.echoMode() == QLineEdit.Normal
-        window.detail_skip_confirm_check.setChecked(True)
-        assert not window.detail_confirm_edit.isEnabled()
-
+        window._payload_rows[0].confirm = "short"
         payloads, error = window._collect_create_payloads()
         assert error is None
         assert payloads is not None
         assert payloads[0].password == "short"
 
-        window.create_compress_check.setChecked(False)
-        assert window._payload_estimates[0] is None
+        group = PasswordFieldGroup(window.tr, include_confirm=True)
+        group.apply_translations(window.tr)
+        group.set_password("short")
+        group.show_password_check.setChecked(True)
+        assert group.password_edit.echoMode() == QLineEdit.Normal
+        group.skip_confirm_check.setChecked(True)
+        assert not group.confirm_edit.isEnabled()
 
-        window.write_password_edit.setText("short")
-        assert window.tr.t("gui.message.weak_password_hint") in window.write_password_hint_label.text()
-        window.write_show_password_check.setChecked(True)
-        assert window.write_password_edit.echoMode() == QLineEdit.Normal
-        window.write_skip_confirm_check.setChecked(True)
-        assert not window.write_confirm_edit.isEnabled()
-
-        window.extract_show_password_check.setChecked(True)
-        assert window.extract_password_edit.echoMode() == QLineEdit.Normal
-    finally:
-        window.close()
-        app.processEvents()
-
-
-def test_gui_zip_wrapper_validation_helpers(monkeypatch, tmp_path):
-    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
-    from PySide6.QtWidgets import QApplication, QLineEdit
-
-    from gui.main_window import MainWindow
-
-    app = QApplication.instance() or QApplication([])
-    window = MainWindow(repo_root=source_root())
-    visible = tmp_path / "visible"
-    entry_source = tmp_path / "entry-source"
-    visible.mkdir()
-    entry_source.mkdir()
-    try:
-        wrapper, error = window._collect_zip_wrapper_options()
-        assert error is None
-        assert wrapper is not None
-        assert wrapper.enabled is True
-        assert wrapper.visible_source_dir is None
-
-        window.zip_visible_source_edit.setText(str(visible))
-        window.zip_entry_source_edit.setText(str(entry_source))
-        wrapper, error = window._collect_zip_wrapper_options()
+        (tmp_path / "visible").mkdir()
+        (tmp_path / "entry").mkdir()
+        state = ZipLayerState(
+            enabled=True,
+            visible_source=str(tmp_path / "visible"),
+            entry_source=str(tmp_path / "entry"),
+            entry_mode="archive",
+            entry_name="Documents.zip",
+            entry_password="",
+            entry_confirm="",
+            show_password=False,
+        )
+        dialog = ZipLayerDialog(window.tr, state, source_root(), window)
+        wrapper, error = dialog.to_options()
         assert wrapper is None
         assert error == window.tr.t("gui.message.passworded_entry_password_required")
-
-        window.zip_entry_password_edit.setText("zip password")
-        window.zip_entry_confirm_edit.setText("different")
-        wrapper, error = window._collect_zip_wrapper_options()
-        assert wrapper is None
-        assert error == window.tr.t("gui.message.password_mismatch")
-
-        window.zip_entry_show_password_check.setChecked(True)
-        assert window.zip_entry_password_edit.echoMode() == QLineEdit.Normal
-        window.zip_entry_confirm_edit.setText("zip password")
-        wrapper, error = window._collect_zip_wrapper_options()
+        dialog.password_group.set_password("zip password", "zip password")
+        wrapper, error = dialog.to_options()
         assert error is None
         assert wrapper is not None
-        assert wrapper.visible_source_dir == visible
-        assert wrapper.encrypted_entry_source_dir == entry_source
-        assert wrapper.encrypted_entry_name == "Documents.zip"
         assert wrapper.encrypted_entry_password == "zip password"
-        assert wrapper.encrypted_entry_mode == "archive"
-
-        files_index = window.zip_entry_mode_combo.findData("files")
-        window.zip_entry_mode_combo.setCurrentIndex(files_index)
-        assert not window.zip_entry_name_edit.isEnabled()
-        wrapper, error = window._collect_zip_wrapper_options()
-        assert error is None
-        assert wrapper is not None
-        assert wrapper.encrypted_entry_mode == "files"
-
-        window.zip_wrapper_check.setChecked(False)
-        wrapper, error = window._collect_zip_wrapper_options()
-        assert error is None
-        assert wrapper is None
-        assert not window.zip_visible_source_edit.isEnabled()
     finally:
         window.close()
         app.processEvents()
@@ -417,8 +358,9 @@ def test_gui_analyze_and_auto_plan_helpers(monkeypatch, tmp_path):
     (source / "large.bin").write_bytes(b"a" * 300_000)
     try:
         window.create_size_spin.setValue(1)
-        window._payload_source_edit(0).setText(str(source))
-        window._payload_estimates[0] = 300_000
+        window._payload_rows.clear()
+        window._add_payload_row(0, str(source), "pass", "pass")
+        window._payload_rows[0].estimate = 300_000
         window._refresh_payload_planning()
         assert window.payload_table.item(0, 4).text() == window.tr.t("gui.status_payload.too_large")
 

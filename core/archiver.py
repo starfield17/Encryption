@@ -6,6 +6,7 @@ import os
 import stat
 import struct
 import zipfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import BinaryIO
@@ -14,6 +15,8 @@ import pyzipper
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+
+from core.layout import resolve_layout, slot_offset
 
 DEFAULT_CONTAINER_SIZE_MB = 100
 DEFAULT_SLOT_COUNT = 4
@@ -75,17 +78,19 @@ class DeniableArchiver:
         self,
         container_path: str | Path,
         size_mb: int = DEFAULT_CONTAINER_SIZE_MB,
-        slot_count: int = DEFAULT_SLOT_COUNT,
+        slot_count: int | None = None,
         zip_wrapper: ZipWrapperOptions | None = None,
+        layout: Sequence[int] | None = None,
     ) -> None:
         if size_mb <= 0:
             raise ValueError("size_mb must be greater than 0")
-        self._validate_slot_count(slot_count)
 
         slot_region_size = int(size_mb) * 1024 * 1024
-        if slot_region_size % slot_count != 0:
-            raise ValueError("Container size must be divisible by slot count")
-        self._validate_slot_size(slot_region_size // slot_count)
+        resolve_layout(
+            slot_region_size,
+            layout=layout,
+            slot_count=DEFAULT_SLOT_COUNT if layout is None and slot_count is None else slot_count,
+        )
 
         path = Path(container_path)
         with path.open("wb") as handle:
@@ -99,8 +104,9 @@ class DeniableArchiver:
         source_dir: str | Path,
         password: str,
         slot_index: int,
-        slot_count: int = DEFAULT_SLOT_COUNT,
+        slot_count: int | None = None,
         compress: bool = True,
+        layout: Sequence[int] | None = None,
     ) -> None:
         container = Path(container_path)
         source = Path(source_dir)
@@ -110,9 +116,14 @@ class DeniableArchiver:
             raise FileNotFoundError(f"Source directory does not exist: {source}")
 
         slot_region_size = self.slot_region_size(container)
-        slot_size = self._get_slot_size(slot_region_size, slot_count)
-        if not 0 <= slot_index < slot_count:
+        resolved = resolve_layout(
+            slot_region_size,
+            layout=layout,
+            slot_count=DEFAULT_SLOT_COUNT if layout is None and slot_count is None else slot_count,
+        )
+        if not 0 <= slot_index < len(resolved):
             raise ValueError("slot_index out of range")
+        slot_size = resolved[slot_index]
 
         zip_bytes = self._zip_directory(source, compress=compress)
         blob_len = self._slot_plaintext_len(slot_size)
@@ -128,7 +139,7 @@ class DeniableArchiver:
             raise AssertionError("Encrypted slot length does not match slot size")
 
         with container.open("r+b") as handle:
-            handle.seek(self._get_slot_offset(slot_index, slot_size))
+            handle.seek(slot_offset(resolved, slot_index))
             handle.write(slot_bytes)
 
     def extract_payload(
@@ -136,7 +147,8 @@ class DeniableArchiver:
         container_path: str | Path,
         password: str,
         output_dir: str | Path,
-        slot_count: int = DEFAULT_SLOT_COUNT,
+        slot_count: int | None = None,
+        layout: Sequence[int] | None = None,
     ) -> ExtractionResult:
         container = Path(container_path)
         if not container.exists():
@@ -145,31 +157,40 @@ class DeniableArchiver:
         output = Path(output_dir)
         output.mkdir(parents=True, exist_ok=True)
         slot_region_size = self.slot_region_size(container)
-        slot_size = self._get_slot_size(slot_region_size, slot_count)
-        blob_len = self._slot_plaintext_len(slot_size)
+        resolved = resolve_layout(
+            slot_region_size,
+            layout=layout,
+            slot_count=DEFAULT_SLOT_COUNT if layout is None and slot_count is None else slot_count,
+        )
 
         first_valid_zip: bytes | None = None
+        first_max_size = 0
         with container.open("rb") as handle:
-            for slot_index in range(slot_count):
-                slot_bytes = self._read_slot(handle, slot_index, slot_size)
+            for slot_index, slot_size in enumerate(resolved):
+                slot_bytes = self._read_slot_layout(handle, resolved, slot_index)
                 parsed = self._try_decrypt_slot(slot_bytes, password, slot_index, slot_size)
                 if parsed is None:
                     continue
+                blob_len = self._slot_plaintext_len(slot_size)
                 try:
                     self._validate_zip(parsed, output, blob_len)
                 except (UnsafeZipError, zipfile.BadZipFile, OSError):
                     continue
                 if first_valid_zip is None:
                     first_valid_zip = parsed
+                    first_max_size = blob_len
 
         if first_valid_zip is not None:
             try:
-                self._safe_extract_zip(first_valid_zip, output, blob_len)
+                self._safe_extract_zip(first_valid_zip, output, first_max_size)
             except (UnsafeZipError, zipfile.BadZipFile):
                 return self._blind_raw_dump(container, password, output)
             return ExtractionResult(message=SUCCESS_MESSAGE, raw_dumped=False, output_dir=output)
 
         return self._blind_raw_dump(container, password, output)
+
+    def estimate_zip_size(self, source_dir: str | Path, compress: bool = True) -> int:
+        return len(self._zip_directory(Path(source_dir), compress=compress))
 
     def slot_region_size(self, container_path: str | Path) -> int:
         container = Path(container_path)
@@ -550,6 +571,14 @@ class DeniableArchiver:
 
     def _read_slot(self, handle: BinaryIO, slot_index: int, slot_size: int) -> bytes:
         handle.seek(self._get_slot_offset(slot_index, slot_size))
+        slot_bytes = handle.read(slot_size)
+        if len(slot_bytes) != slot_size:
+            raise ValueError("Could not read full slot")
+        return slot_bytes
+
+    def _read_slot_layout(self, handle: BinaryIO, layout: Sequence[int], slot_index: int) -> bytes:
+        slot_size = layout[slot_index]
+        handle.seek(slot_offset(layout, slot_index))
         slot_bytes = handle.read(slot_size)
         if len(slot_bytes) != slot_size:
             raise ValueError("Could not read full slot")

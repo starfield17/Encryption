@@ -15,6 +15,31 @@ from core.archiver import (
     DeniableArchiver,
     ZipWrapperOptions,
 )
+from core.layout import parse_slot_sizes_mib
+
+
+def _add_layout_args(parser: argparse.ArgumentParser, *, default_slots: int | None = DEFAULT_SLOT_COUNT) -> None:
+    parser.add_argument(
+        "--slots",
+        type=int,
+        default=default_slots,
+        help="Equal slot count (mutually exclusive with --slot-sizes)",
+    )
+    parser.add_argument(
+        "--slot-sizes",
+        help="Comma-separated slot sizes in MiB (layout secret; e.g. 10,40,30,20)",
+    )
+
+
+def _layout_kwargs(args: argparse.Namespace) -> dict[str, object]:
+    if getattr(args, "slot_sizes", None):
+        if args.slots is not None and args.slots != DEFAULT_SLOT_COUNT:
+            # User set both explicitly — still prefer exclusive check via presence of slot_sizes
+            pass
+        layout = parse_slot_sizes_mib(args.slot_sizes)
+        return {"layout": layout, "slot_count": None}
+    slots = args.slots if args.slots is not None else DEFAULT_SLOT_COUNT
+    return {"layout": None, "slot_count": slots}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -24,7 +49,7 @@ def _build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init", help="Initialize a random container")
     init_parser.add_argument("container", help="Output container path")
     init_parser.add_argument("--size-mb", type=int, default=DEFAULT_CONTAINER_SIZE_MB, help="Container size in MiB")
-    init_parser.add_argument("--slots", type=int, default=DEFAULT_SLOT_COUNT, help="Number of fixed-size slots")
+    _add_layout_args(init_parser)
     wrapper_group = init_parser.add_mutually_exclusive_group()
     wrapper_group.add_argument(
         "--zip-wrapper",
@@ -52,13 +77,13 @@ def _build_parser() -> argparse.ArgumentParser:
     write_parser.add_argument("container", help="Container path")
     write_parser.add_argument("source_dir", help="Source directory to archive")
     write_parser.add_argument("--slot", type=int, required=True, help="Slot index to overwrite")
-    write_parser.add_argument("--slots", type=int, default=DEFAULT_SLOT_COUNT, help="Number of fixed-size slots")
+    _add_layout_args(write_parser)
     write_parser.add_argument("--no-compress", action="store_true", help="Store files without ZIP compression")
 
     extract_parser = subparsers.add_parser("extract", help="Extract a matching payload or a blind raw dump")
     extract_parser.add_argument("container", help="Container path")
     extract_parser.add_argument("output_dir", help="Output directory")
-    extract_parser.add_argument("--slots", type=int, default=DEFAULT_SLOT_COUNT, help="Number of fixed-size slots")
+    _add_layout_args(extract_parser)
 
     return parser
 
@@ -87,6 +112,17 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     try:
         if args.command == "init":
+            if args.slot_sizes and args.slots != DEFAULT_SLOT_COUNT:
+                raise ValueError("Use either --slots or --slot-sizes, not both")
+            if args.slot_sizes:
+                layout = parse_slot_sizes_mib(args.slot_sizes)
+                expected = args.size_mb * 1024 * 1024
+                if sum(layout) != expected:
+                    raise ValueError("Slot sizes in MiB must sum to --size-mb")
+                layout_kwargs: dict[str, object] = {"layout": layout, "slot_count": None}
+            else:
+                layout_kwargs = {"layout": None, "slot_count": args.slots}
+
             zip_wrapper = None
             if args.zip_wrapper:
                 zip_wrapper = ZipWrapperOptions(
@@ -100,26 +136,38 @@ def run_cli(argv: list[str] | None = None) -> int:
                     encrypted_entry_mode=args.passworded_entry_mode,
                 )
             archiver.initialize_container(
-                Path(args.container), size_mb=args.size_mb, slot_count=args.slots, zip_wrapper=zip_wrapper
+                Path(args.container),
+                size_mb=args.size_mb,
+                zip_wrapper=zip_wrapper,
+                **layout_kwargs,  # type: ignore[arg-type]
             )
             print("Container initialized.")
             return 0
         if args.command == "write":
+            if args.slot_sizes and args.slots != DEFAULT_SLOT_COUNT:
+                raise ValueError("Use either --slots or --slot-sizes, not both")
             password = _prompt_new_password()
+            layout_kwargs = _layout_kwargs(args)
             archiver.write_payload(
                 Path(args.container),
                 Path(args.source_dir),
                 password,
                 args.slot,
-                slot_count=args.slots,
                 compress=not args.no_compress,
+                **layout_kwargs,  # type: ignore[arg-type]
             )
             print("Payload written.")
             return 0
         if args.command == "extract":
+            if args.slot_sizes and args.slots != DEFAULT_SLOT_COUNT:
+                raise ValueError("Use either --slots or --slot-sizes, not both")
             password = getpass.getpass("Password: ")
+            layout_kwargs = _layout_kwargs(args)
             result = archiver.extract_payload(
-                Path(args.container), password, Path(args.output_dir), slot_count=args.slots
+                Path(args.container),
+                password,
+                Path(args.output_dir),
+                **layout_kwargs,  # type: ignore[arg-type]
             )
             print(result.message)
             return 0

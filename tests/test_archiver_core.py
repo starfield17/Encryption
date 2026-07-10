@@ -208,8 +208,11 @@ def test_zip_wrapper_direct_entries_reject_duplicate_visible_path(tmp_path):
 def test_zip_wrapper_visible_only_passes_infozip_test(tmp_path):
     archiver = DeniableArchiver()
     visible = tmp_path / "visible"
+    source = tmp_path / "payload"
     visible.mkdir()
+    source.mkdir()
     (visible / "readme.txt").write_text("visible", encoding="utf-8")
+    (source / "secret.txt").write_text("hidden payload", encoding="utf-8")
 
     vault = tmp_path / "visible.zip"
     archiver.initialize_container(
@@ -218,14 +221,36 @@ def test_zip_wrapper_visible_only_passes_infozip_test(tmp_path):
         slot_count=4,
         zip_wrapper=ZipWrapperOptions(enabled=True, visible_source_dir=visible),
     )
+    archiver.write_payload(vault, source, "long unique passphrase", 1, slot_count=4)
 
-    result = subprocess.run(
-        ["zip", "-T", str(vault)], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=False
+    # System zip/unzip should treat the container as a normal ZIP of visible files only.
+    test_result = subprocess.run(["zip", "-T", str(vault)], text=True, capture_output=True, check=False)
+    assert test_result.returncode == 0
+    combined = (test_result.stdout or "") + (test_result.stderr or "")
+    assert "OK" in combined or "test of" in combined.lower()
+
+    list_result = subprocess.run(["unzip", "-l", str(vault)], text=True, capture_output=True, check=False)
+    assert list_result.returncode == 0
+    listing = list_result.stdout
+    assert "readme.txt" in listing
+    assert "secret.txt" not in listing
+
+    extract_dir = tmp_path / "unzipped"
+    extract_dir.mkdir()
+    extract_result = subprocess.run(
+        ["unzip", "-o", str(vault), "-d", str(extract_dir)],
+        text=True,
+        capture_output=True,
+        check=False,
     )
+    assert extract_result.returncode == 0
+    assert (extract_dir / "readme.txt").read_text(encoding="utf-8") == "visible"
+    assert not (extract_dir / "secret.txt").exists()
 
-    assert result.returncode == 0
-    assert "test of" in result.stdout
-    assert "OK" in result.stdout
+    payload_out = tmp_path / "payload-out"
+    result = archiver.extract_payload(vault, "long unique passphrase", payload_out, slot_count=4)
+    assert result.raw_dumped is False
+    assert (payload_out / "secret.txt").read_text(encoding="utf-8") == "hidden payload"
 
 
 def test_wrong_password_produces_generic_raw_dump(tmp_path):
@@ -370,3 +395,24 @@ def test_safe_extract_writes_regular_nested_files(tmp_path):
     archiver._safe_extract_zip(zip_bytes, output, 1024)
 
     assert (output / "folder" / "file.txt").read_bytes() == b"ok"
+
+
+def test_unequal_layout_roundtrip(tmp_path):
+    archiver = archiver_module.DeniableArchiver()
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "file.txt").write_text("payload", encoding="utf-8")
+    vault = tmp_path / "unequal.darc"
+    mib = 1024 * 1024
+    layout = (mib // 4, 3 * mib // 4)
+    archiver.initialize_container(vault, size_mb=1, layout=layout)
+    archiver.write_payload(vault, source, "long unique passphrase", 1, layout=layout)
+
+    output = tmp_path / "out"
+    result = archiver.extract_payload(vault, "long unique passphrase", output, layout=layout)
+    assert result.raw_dumped is False
+    assert (output / "file.txt").read_text(encoding="utf-8") == "payload"
+
+    wrong = tmp_path / "wrong"
+    bad = archiver.extract_payload(vault, "long unique passphrase", wrong, slot_count=4)
+    assert bad.raw_dumped is True

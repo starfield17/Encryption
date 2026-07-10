@@ -41,6 +41,15 @@ Initialize a container:
 python darc.py init vault.zip --size-mb 100 --slots 4
 ```
 
+Custom slot sizes (layout secret; MiB values must sum to `--size-mb`). Layout is **not** stored in the file:
+
+```bash
+python darc.py init vault.zip --size-mb 100 --slot-sizes 10,40,30,20
+python darc.py write vault.zip ./payload_files --slot 1 --slot-sizes 10,40,30,20
+python darc.py extract vault.zip ./output --slot-sizes 10,40,30,20
+```
+
+
 Add optional ZIP-visible content at creation time:
 
 ```bash
@@ -78,7 +87,17 @@ python darc.py extract vault.zip ./output --slots 4
 
 Passwords are requested with `getpass`; command-line password arguments are intentionally not provided.
 
-For ZIP-compatible containers with ordinary visible entries, `zip -T vault.zip` can be used as a quick ZIP tool compatibility check. Passworded ZIP entries use WinZip AES and may require WinRAR, 7-Zip, or compatible tooling to extract.
+### ZIP camouflage check (system zip/unzip)
+
+For ZIP-compatible containers, system tools should only see the decoy layer:
+
+```bash
+zip -T vault.zip
+unzip -l vault.zip
+unzip -o vault.zip -d /tmp/vault-visible
+```
+
+`zip -T` should report OK. `unzip -l` lists only visible (and optional passworded ZIP) entries—not encrypted slot payloads. Passworded ZIP entries use WinZip AES and may require WinRAR, 7-Zip, or compatible tooling to extract.
 
 ## GUI
 

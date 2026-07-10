@@ -4,6 +4,7 @@ import contextlib
 import os
 import shutil
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,44 +44,13 @@ class AnalyzePayloadsWorker(QThread):
             estimates: list[PayloadEstimate] = []
             for row_index, source_dir in self.payload_sources:
                 try:
-                    zip_bytes = archiver._zip_directory(source_dir, compress=self.compress)
-                    estimates.append(
-                        PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=len(zip_bytes))
-                    )
+                    zip_size = archiver.estimate_zip_size(source_dir, compress=self.compress)
+                    estimates.append(PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=zip_size))
                 except Exception as exc:
                     estimates.append(
                         PayloadEstimate(row_index=row_index, source_dir=source_dir, zip_size=None, error=str(exc))
                     )
             self.completed.emit(estimates)
-        except Exception as exc:
-            self.failed.emit(str(exc))
-
-
-class InitWorker(QThread):
-    completed = Signal(str)
-    failed = Signal(str)
-
-    def __init__(
-        self,
-        container_path: Path,
-        size_mb: int,
-        slot_count: int,
-        success_message: str,
-        zip_wrapper: ZipWrapperOptions | None = None,
-    ) -> None:
-        super().__init__()
-        self.container_path = container_path
-        self.size_mb = size_mb
-        self.slot_count = slot_count
-        self.success_message = success_message
-        self.zip_wrapper = zip_wrapper
-
-    def run(self) -> None:
-        try:
-            DeniableArchiver().initialize_container(
-                self.container_path, self.size_mb, self.slot_count, self.zip_wrapper
-            )
-            self.completed.emit(self.success_message)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -93,15 +63,17 @@ class CreateContainerWorker(QThread):
         self,
         container_path: Path,
         size_mb: int,
-        slot_count: int,
+        slot_count: int | None,
         payloads: list[PayloadInput],
         zip_wrapper: ZipWrapperOptions | None,
         success_message: str,
+        layout: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
         self.container_path = container_path
         self.size_mb = size_mb
-        self.slot_count = slot_count
+        self.slot_count = slot_count if layout is None else None
+        self.layout = layout
         self.payloads = payloads
         self.zip_wrapper = zip_wrapper
         self.success_message = success_message
@@ -119,7 +91,13 @@ class CreateContainerWorker(QThread):
                 temp_path = Path(handle.name)
 
             archiver = DeniableArchiver()
-            archiver.initialize_container(temp_path, self.size_mb, self.slot_count, self.zip_wrapper)
+            archiver.initialize_container(
+                temp_path,
+                self.size_mb,
+                slot_count=self.slot_count,
+                zip_wrapper=self.zip_wrapper,
+                layout=self.layout,
+            )
             for payload in self.payloads:
                 archiver.write_payload(
                     temp_path,
@@ -127,6 +105,7 @@ class CreateContainerWorker(QThread):
                     payload.password,
                     payload.slot_index,
                     slot_count=self.slot_count,
+                    layout=self.layout,
                     compress=payload.compress,
                 )
             os.replace(temp_path, self.container_path)
@@ -149,16 +128,18 @@ class WriteWorker(QThread):
         source_dir: Path,
         password: str,
         slot_index: int,
-        slot_count: int,
+        slot_count: int | None,
         compress: bool,
         success_message: str,
+        layout: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
         self.container_path = container_path
         self.source_dir = source_dir
         self.password = password
         self.slot_index = slot_index
-        self.slot_count = slot_count
+        self.slot_count = slot_count if layout is None else None
+        self.layout = layout
         self.compress = compress
         self.success_message = success_message
 
@@ -170,6 +151,7 @@ class WriteWorker(QThread):
                 self.password,
                 self.slot_index,
                 slot_count=self.slot_count,
+                layout=self.layout,
                 compress=self.compress,
             )
             self.completed.emit(self.success_message)
@@ -186,19 +168,21 @@ class ExtractWorker(QThread):
         container_path: Path,
         password: str,
         output_dir: Path,
-        slot_count: int,
+        slot_count: int | None = None,
         try_common_slot_counts: bool = False,
+        layout: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
         self.container_path = container_path
         self.password = password
         self.output_dir = output_dir
-        self.slot_count = slot_count
+        self.slot_count = slot_count if layout is None else None
+        self.layout = layout
         self.try_common_slot_counts = try_common_slot_counts
 
     def run(self) -> None:
         try:
-            if self.try_common_slot_counts:
+            if self.try_common_slot_counts and self.layout is None:
                 result = self._extract_with_common_slot_counts()
                 self.completed.emit(result.message)
                 return
@@ -207,6 +191,7 @@ class ExtractWorker(QThread):
                 self.password,
                 self.output_dir,
                 slot_count=self.slot_count,
+                layout=self.layout,
             )
             self.completed.emit(result.message)
         except Exception as exc:
@@ -237,7 +222,11 @@ class ExtractWorker(QThread):
                 self._merge_directory_contents(temp_output, self.output_dir)
                 return result
 
-        fallback_slot_count = self.slot_count if self._slot_count_is_compatible(self.slot_count) else candidates[0]
+        fallback_slot_count = (
+            self.slot_count
+            if self.slot_count is not None and self._slot_count_is_compatible(self.slot_count)
+            else candidates[0]
+        )
         return archiver.extract_payload(
             self.container_path,
             self.password,
@@ -249,15 +238,16 @@ class ExtractWorker(QThread):
         try:
             slot_region_size = DeniableArchiver().slot_region_size(self.container_path)
         except OSError:
-            return [self.slot_count]
+            return [self.slot_count or 4]
+        preferred = self.slot_count if self.slot_count is not None else 4
         candidates: list[int] = []
-        for slot_count in [self.slot_count, 2, 4, 6, 8]:
+        for slot_count in [preferred, 2, 4, 6, 8]:
             if slot_count < 2 or slot_count in candidates:
                 continue
             if not self._slot_count_is_compatible(slot_count, slot_region_size):
                 continue
             candidates.append(slot_count)
-        return candidates or [self.slot_count]
+        return candidates or [preferred]
 
     def _slot_count_is_compatible(self, slot_count: int, slot_region_size: int | None = None) -> bool:
         if slot_count < 2:
